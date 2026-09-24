@@ -1,0 +1,4 @@
+# pyspark is only needed to capture a fresh event log with `sjp capture`.
+# Reading and profiling a log that already exists needs nothing but the standard library.
+# 3.5.x rather than 4.x because 4.x wants Java 17 and this runs on Java 11.
+pyspark==3.5.6

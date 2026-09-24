@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+# Anchored to the repo root on purpose. An unanchored `eventlogs/` also matches
+# tests/fixtures/eventlogs, which silently kept the committed logs out of the repo and
+# would have left every figure in the README resting on a file nobody else has.
+/eventlogs/
+/out/
