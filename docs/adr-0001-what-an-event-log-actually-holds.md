@@ -69,37 +69,45 @@ wrong.
 `SparkListenerExecutorAdded` holds `Total Cores`, which is the other half of a partition
 count recommendation.
 
-`SparkListenerStageCompleted` repeats most of the task metrics as 37 accumulables under
-names like `internal.metrics.memoryBytesSpilled`. Those are stage totals. The per task
-spread, which is the whole point of skew detection, is only in the task events.
+`SparkListenerStageCompleted` repeats most of the task metrics as accumulables under names
+like `internal.metrics.memoryBytesSpilled`. The grouping stage of the skewed job carries 37
+of them. Those are stage totals and the per task spread, which is the whole point of skew
+detection, is only in the task events.
+`docs/adr-0002-what-a-stage-total-can-and-cannot-say.md` is what came of measuring them.
 
 ## What the fixtures carry, measured
 
 ```
-skewed    stage 0  tasks 2
-    records   median 0.0  max 0  ratio 0.00
-    duration  median 3886.0 ms  max 3895 ms  ratio 1.00
+skewed    stage 0  tasks 2 of 2
+    records   median 0.0  max 0  spread 0.00
+    duration  median 3886.0 ms  max 3895 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
-skewed    stage 1  tasks 8
-    records   median 1000000.0  max 1000000  ratio 1.00
-    duration  median 492.0 ms  max 855 ms  ratio 1.74
+    peak      0 largest task  0 summed by the stage
+skewed    stage 1  tasks 8 of 8
+    records   median 1000000.0  max 1000000  spread 1.00
+    duration  median 492.0 ms  max 855 ms  spread 1.74
     spilled   0 memory  0 disk
-skewed    stage 2  tasks 8
-    records   median 156784.0  max 6932663  ratio 44.22
-    duration  median 207.0 ms  max 3048 ms  ratio 14.72
+    peak      0 largest task  0 summed by the stage
+skewed    stage 2  tasks 8 of 8
+    records   median 156784.0  max 6932663  spread 44.22
+    duration  median 207.0 ms  max 3048 ms  spread 14.72
     spilled   620755808 memory  88088795 disk
-balanced  stage 0  tasks 2
-    records   median 0.0  max 0  ratio 0.00
-    duration  median 3671.5 ms  max 3686 ms  ratio 1.00
+    peak      377486768 largest task  562035856 summed by the stage
+balanced  stage 0  tasks 2 of 2
+    records   median 0.0  max 0  spread 0.00
+    duration  median 3671.5 ms  max 3686 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
-balanced  stage 1  tasks 8
-    records   median 1000000.0  max 1000000  ratio 1.00
-    duration  median 542.0 ms  max 849 ms  ratio 1.57
+    peak      0 largest task  0 summed by the stage
+balanced  stage 1  tasks 8 of 8
+    records   median 1000000.0  max 1000000  spread 1.00
+    duration  median 542.0 ms  max 849 ms  spread 1.57
     spilled   0 memory  0 disk
-balanced  stage 2  tasks 8
-    records   median 984924.5  max 1206030  ratio 1.22
-    duration  median 938.0 ms  max 1258 ms  ratio 1.34
+    peak      0 largest task  0 summed by the stage
+balanced  stage 2  tasks 8 of 8
+    records   median 984924.5  max 1206030  spread 1.22
+    duration  median 938.0 ms  max 1258 ms  spread 1.34
     spilled   0 memory  0 disk
+    peak      167771904 largest task  1166014800 summed by the stage
 ```
 
 Three things fall out of that table.

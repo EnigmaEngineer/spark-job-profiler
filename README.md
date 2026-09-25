@@ -5,16 +5,16 @@ This reads the same file and names the stage that skewed, the spill that mattere
 spill that did not.
 
 ```
-python -m sjp inventory tests/fixtures/eventlogs/skewed
+python -m sjp stages tests/fixtures/eventlogs/skewed/*
 ```
 
 That needs nothing but the standard library. Capturing a fresh log needs pyspark.
 
 ## Where it is
 
-The event log format is measured and written down, the sample jobs exist and produce known
-pathologies, and there are committed logs to build against. The parser, the skew detector
-and the recommendations are not built yet.
+The parser and the stage and task model are built, and there are two committed logs to
+build against. The skew detector and the recommendations are not, so `sjp stages` prints
+measurements and never a verdict about one.
 
 ## One entry point, and every command says what it does to state
 
@@ -22,7 +22,8 @@ and the recommendations are not built yet.
 $ python -m sjp commands
 {
   "capture": "write",
-  "inventory": "read"
+  "inventory": "read",
+  "stages": "read"
 }
 ```
 
@@ -44,7 +45,8 @@ $ python scripts/contract_probe.py
 mapping, which is what a guard reads:
 {
   "capture": "write",
-  "inventory": "read"
+  "inventory": "read",
+  "stages": "read"
 }
 reads that changed the store: none
 control, lying read caught: ['liar']
@@ -64,7 +66,8 @@ cannot inspect will skip the case it was written for.
 ```
 sjp/cli.py          the entry point, the effect registry and the mapping
 sjp/contract.py     snapshot a directory, run the reads, diff it
-sjp/eventlog.py     read a log, count events, say what is missing
+sjp/eventlog.py     get a log off disk, count events, say what is missing
+sjp/model.py        the stage and task model, and the events it declares it reads
 sjp/commands.py     the commands that exist
 jobs/sample.py      two jobs that differ in one expression
 scripts/            drivers and controls, no judgements
@@ -83,30 +86,36 @@ profiler is pointed at the log, so the profiler can be graded instead of believe
 Measured on this machine under pyspark 3.5.6 and OpenJDK 11.0.32.1.
 
 ```
-skewed    stage 0  tasks 2
-    records   median 0.0  max 0  ratio 0.00
-    duration  median 3886.0 ms  max 3895 ms  ratio 1.00
+skewed    stage 0  tasks 2 of 2
+    records   median 0.0  max 0  spread 0.00
+    duration  median 3886.0 ms  max 3895 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
-skewed    stage 1  tasks 8
-    records   median 1000000.0  max 1000000  ratio 1.00
-    duration  median 492.0 ms  max 855 ms  ratio 1.74
+    peak      0 largest task  0 summed by the stage
+skewed    stage 1  tasks 8 of 8
+    records   median 1000000.0  max 1000000  spread 1.00
+    duration  median 492.0 ms  max 855 ms  spread 1.74
     spilled   0 memory  0 disk
-skewed    stage 2  tasks 8
-    records   median 156784.0  max 6932663  ratio 44.22
-    duration  median 207.0 ms  max 3048 ms  ratio 14.72
+    peak      0 largest task  0 summed by the stage
+skewed    stage 2  tasks 8 of 8
+    records   median 156784.0  max 6932663  spread 44.22
+    duration  median 207.0 ms  max 3048 ms  spread 14.72
     spilled   620755808 memory  88088795 disk
-balanced  stage 0  tasks 2
-    records   median 0.0  max 0  ratio 0.00
-    duration  median 3671.5 ms  max 3686 ms  ratio 1.00
+    peak      377486768 largest task  562035856 summed by the stage
+balanced  stage 0  tasks 2 of 2
+    records   median 0.0  max 0  spread 0.00
+    duration  median 3671.5 ms  max 3686 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
-balanced  stage 1  tasks 8
-    records   median 1000000.0  max 1000000  ratio 1.00
-    duration  median 542.0 ms  max 849 ms  ratio 1.57
+    peak      0 largest task  0 summed by the stage
+balanced  stage 1  tasks 8 of 8
+    records   median 1000000.0  max 1000000  spread 1.00
+    duration  median 542.0 ms  max 849 ms  spread 1.57
     spilled   0 memory  0 disk
-balanced  stage 2  tasks 8
-    records   median 984924.5  max 1206030  ratio 1.22
-    duration  median 938.0 ms  max 1258 ms  ratio 1.34
+    peak      0 largest task  0 summed by the stage
+balanced  stage 2  tasks 8 of 8
+    records   median 984924.5  max 1206030  spread 1.22
+    duration  median 938.0 ms  max 1258 ms  spread 1.34
     spilled   0 memory  0 disk
+    peak      167771904 largest task  1166014800 summed by the stage
 ```
 
 The first stage is the row worth stopping on. It is the same expression in both jobs and
@@ -133,26 +142,96 @@ Figures above come out of `tests/run_all.py`, which asserts them against the com
 logs. `docs/adr-0001-what-an-event-log-actually-holds.md` has where each number lives in
 the file.
 
+## The stage and task model
+
+One application, its jobs, its stages and every task in them. A task duration is
+`Finish Time` minus `Launch Time`, which is not a field in the log. `Executor Run Time` is
+the compute part and it is a smaller number, so both are kept and the difference between
+them is its own number.
+
+Run it with `python -m sjp stages tests/fixtures/eventlogs/skewed/*` and the skewed
+fixture comes back like this.
+
+```
+local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
+  shuffle partitions 8
+  stage 0  2 of 2 tasks  4044 ms wall
+      duration ms   median 3886.0  max 3895  spread 1.00
+      records read  median 0.0  max 0  spread 0.00
+      outside run   median 101.5  max 103  spread 1.01
+      spilled       117440288 memory  61304287 disk
+      peak memory   0 largest task  0 summed by the stage
+      stage totals  12 mapped, 4 absent, 0 disagree with the tasks
+  stage 1  8 of 8 tasks  2278 ms wall
+      duration ms   median 492.0  max 855  spread 1.74
+      records read  median 1000000.0  max 1000000  spread 1.00
+      outside run   median 11.5  max 16  spread 1.39
+      spilled       0 memory  0 disk
+      peak memory   0 largest task  0 summed by the stage
+      stage totals  12 mapped, 5 absent, 0 disagree with the tasks
+  stage 2  8 of 8 tasks  3879 ms wall
+      duration ms   median 207.0  max 3048  spread 14.72
+      records read  median 156784.0  max 6932663  spread 44.22
+      outside run   median 16.0  max 38  spread 2.38
+      spilled       620755808 memory  88088795 disk
+      peak memory   377486768 largest task  562035856 summed by the stage
+      stage totals  12 mapped, 3 absent, 0 disagree with the tasks
+```
+
+Nothing there is a verdict. A spread of 44.22 is a measurement beside the thing it should
+be compared against, and deciding that it is a problem is the detector's job.
+
+### The events it reads are the events it registers
+
+Each handler registers itself against one event name and says what the model takes from
+it, so the set of names the profiler needs is read out of the code rather than kept in a
+list beside it. `sjp inventory` reports a log as complete against that set. A check walks
+the module and refuses any Spark event name written into it that no handler claimed,
+because an inline comparison against an unregistered name is how the list and the parser
+would come apart again.
+
+### The stage totals are right, and that is why they are not enough
+
+Spark reports the same metrics twice. Every stage carries accumulable totals, and every
+task carries its own copy. Twelve metrics over six stages, and every total the log
+reported equals the sum over that stage's tasks exactly.
+
+```
+skewed    stage totals: 24 present, 12 absent, 0 disagree with the task sums
+balanced  stage totals: 22 present, 14 absent, 0 disagree with the task sums
+control, a stage missing one task disagrees: yes
+control, a repeated total name is refused: yes
+controls: 0 of 2 failed
+```
+
+A sum cannot hold a spread, which is the whole question. The one that would have caused
+damage is `internal.metrics.peakExecutionMemory`, because it is a sum of per task peaks
+and the balanced job's stage total is more than twice the skewed job's while the balanced
+job spilled nothing. `docs/adr-0002-what-a-stage-total-can-and-cannot-say.md` has the
+numbers and the two other traps in that list.
+
 ## Running the checks
 
 ```
 $ python tests/run_all.py
-65 passed, 0 failed, 65 checks
+114 passed, 0 failed, 114 checks
 ```
 
 Every check is graded by a mutation pass rather than counted.
 
 ```
-sjp/cli.py: 18 mutation sites, running 0 to 18
-18 killed, 0 survived, 0 ungraded, 18 graded
-sjp/commands.py: 14 mutation sites, running 0 to 14
-14 killed, 0 survived, 0 ungraded, 14 graded
-sjp/contract.py: 6 mutation sites, running 0 to 6
-6 killed, 0 survived, 0 ungraded, 6 graded
+sjp/model.py: 34 mutation sites, running 0 to 34
+34 killed, 0 survived, 0 ungraded, 34 graded
+sjp/commands.py: 20 mutation sites, running 0 to 20
+20 killed, 0 survived, 0 ungraded, 20 graded
 sjp/eventlog.py: 9 mutation sites, running 0 to 9
 9 killed, 0 survived, 0 ungraded, 9 graded
-scripts/fixture_probe.py: 17 mutation sites, running 0 to 17
-16 killed, 1 survived, 0 ungraded, 17 graded
+sjp/cli.py: 18 mutation sites, running 0 to 18
+18 killed, 0 survived, 0 ungraded, 18 graded
+sjp/contract.py: 6 mutation sites, running 0 to 6
+6 killed, 0 survived, 0 ungraded, 6 graded
+scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
+19 killed, 1 survived, 0 ungraded, 20 graded
 jobs/sample.py: 17 mutation sites, running 0 to 17
 2 killed, 15 survived, 0 ungraded, 17 graded
 ```
@@ -187,7 +266,18 @@ An event log discloses the driver's working directory, the operating system user
 the job and the full classpath. The committed logs are unedited and carry all three.
 Editing them would make them something other than real logs.
 
-The arithmetic that grades the fixtures lives in the test module rather than in the
-library. That is deliberate for now, because the real detector does not exist yet and a
-median in two places would be a second implementation to keep in step. It moves into the
-library the day the detector lands.
+The model maps twelve accumulables onto a field it keeps per task. The grouping stage of
+the skewed job carries thirty seven. The other twenty five are not read, and nothing here
+argues that they are uninteresting.
+
+The model keeps every task of every stage. Both committed logs hold eighteen tasks. What
+this costs on a log from a job with a million tasks has not been measured, so nothing here
+claims it is fine.
+
+`sjp stages` reports a stage that was submitted and never completed with whatever the log
+holds for it. A job that died mid stage is a real thing to be handed, and the timings for
+that stage are missing rather than zero.
+
+A stage seen only through its task events declares no tasks, because the planned count
+lives on the submitted event. Nothing in either committed log exercises that and the check
+for it is built rather than captured.
