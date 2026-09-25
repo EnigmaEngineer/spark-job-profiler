@@ -12,14 +12,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-EXPECTED_MODULES = 6
+EXPECTED_MODULES = 7
 
 
 def collect():
     from tests import test_cli_contract, test_commands, test_contract_checks
-    from tests import test_eventlog, test_fixture_pathologies, test_sample_jobs
+    from tests import test_eventlog, test_fixture_pathologies, test_model
+    from tests import test_sample_jobs
     return [test_cli_contract, test_commands, test_contract_checks,
-            test_eventlog, test_fixture_pathologies, test_sample_jobs]
+            test_eventlog, test_fixture_pathologies, test_model, test_sample_jobs]
 
 
 def main():

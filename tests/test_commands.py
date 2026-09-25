@@ -11,7 +11,7 @@ import shutil
 import sys
 import tempfile
 
-from sjp import cli, commands, eventlog
+from sjp import cli, commands, eventlog, model
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
@@ -100,7 +100,7 @@ def check_a_missing_event_is_named_with_the_reason_it_is_wanted():
         _code, text = _run(["inventory", root])
         assert "MISSING" in text, text
         assert "SparkListenerTaskEnd" in text, text
-        assert eventlog.NEEDED["SparkListenerTaskEnd"] in text, text
+        assert model.CONSUMES["SparkListenerTaskEnd"] in text, text
     finally:
         shutil.rmtree(root)
 
@@ -186,7 +186,8 @@ def check_the_commands_word_refuses_trailing_arguments_and_names_them():
 
 def check_the_mapping_is_printed_at_the_indent_that_ships():
     _code, text = _run(["commands"])
-    expected = '{\n  "capture": "write",\n  "inventory": "read"\n}\n'
+    expected = ('{\n  "capture": "write",\n  "inventory": "read",'
+                '\n  "stages": "read"\n}\n')
     assert text == expected, repr(text)
 
 
@@ -263,3 +264,60 @@ def check_a_single_trailing_argument_is_refused_too():
         code, text = _run(["commands", "extra"])
     assert code == 2, (code, text)
     assert "['extra']" in complaint.getvalue(), complaint.getvalue()
+
+
+def check_the_stages_command_prints_the_model_and_changes_nothing():
+    log = os.path.join(SKEWED, sorted(os.listdir(SKEWED))[0])
+    code, text = _run(["stages", log])
+    assert code == 0, (code, text)
+    assert "sjp-skewed" in text, text
+    assert "44.22" in text, text
+    assert "12 mapped" in text, text
+
+
+def check_the_stage_lines_count_the_totals_the_log_left_out():
+    """Absent is the interesting half. Zero absent would mean the stage carried them all."""
+    app = eventlog.profile(commands._first_log(SKEWED))
+    lines = commands.stage_lines(app)
+    absent = [line.split("mapped, ")[1].split(" absent")[0]
+              for line in lines if "mapped," in line]
+    assert absent == ["4", "5", "3"], absent
+
+
+def check_the_stages_command_counts_one_job_as_a_job():
+    assert commands.counted(1, "job") == "1 job"
+    assert commands.counted(0, "job") == "0 jobs"
+    assert commands.counted(3, "stage") == "3 stages"
+
+
+def check_the_read_probe_finds_a_log_under_a_directory_and_skips_the_notes():
+    path = commands._first_log(SKEWED)
+    assert path.endswith(sorted(os.listdir(SKEWED))[0]), path
+    assert not path.endswith(".md"), path
+
+
+def check_the_read_probe_refuses_a_directory_holding_no_log():
+    root = tempfile.mkdtemp(prefix="sjp-nologs-")
+    try:
+        open(os.path.join(root, "notes.md"), "w").close()
+        try:
+            commands._first_log(root)
+        except eventlog.NotAnEventLog:
+            pass
+        else:
+            raise AssertionError("a directory of notes offered a log")
+    finally:
+        shutil.rmtree(root)
+
+
+def check_a_stage_line_names_a_total_that_disagrees_with_its_tasks():
+    """The printed disagreement path is unreachable on a healthy log, so it is built."""
+    import dataclasses
+
+    app = eventlog.profile(commands._first_log(SKEWED))
+    stage = app.stage(2)
+    damaged = dataclasses.replace(app, stages=(dataclasses.replace(
+        stage, tasks=stage.tasks[:-1]),))
+    lines = commands.stage_lines(damaged)
+    assert any("disagree with the tasks" in line for line in lines), lines
+    assert any("memoryBytesSpilled reports" in line for line in lines), lines

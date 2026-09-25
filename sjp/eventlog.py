@@ -1,26 +1,18 @@
-"""What is actually in a Spark event log, read off a log rather than off the docs.
+"""Getting a Spark event log off disk, and saying what is in it.
 
 The format is one JSON object per line. Every object carries an `Event` key naming the
 listener event it came from. Nothing else is guaranteed to be on every line, which is why
-this module counts event names and does not yet build a model of anything.
+this module counts event names and leaves the meaning of them to `sjp.model`.
 
-The stage and task model is the next thing to build. This is the part that says whether
-the material for it is present in a given file.
+What counts as a needed event is `sjp.model.CONSUMES`, which the model builds out of its
+own handlers. It used to be a list kept here by hand. A list of names in one module and a
+parser reading names in another is two places to remember, and the second one to change
+is the one nobody changes.
 """
 import json
 import os
 
-# The events the profiler needs, and the question each one answers. Anything not on this
-# list can still be in the file. This is what gets read, not what Spark writes.
-NEEDED = {
-    "SparkListenerApplicationStart": "when the run started and what it was called",
-    "SparkListenerApplicationEnd": "when it finished, so wall time is a subtraction",
-    "SparkListenerEnvironmentUpdate": "the config the run really used",
-    "SparkListenerJobStart": "which stages belong to which job",
-    "SparkListenerStageSubmitted": "the stage and its task count",
-    "SparkListenerStageCompleted": "stage timings and the accumulator totals",
-    "SparkListenerTaskEnd": "per task duration, shuffle bytes, spill and GC time",
-}
+from sjp import model
 
 
 class NotAnEventLog(Exception):
@@ -87,6 +79,11 @@ def spark_properties(path):
     raise NotAnEventLog("{} records no environment".format(path))
 
 
+def profile(path):
+    """The stage and task model for one log."""
+    return model.build(read_events(path))
+
+
 def inventory(root):
     """Per file, what it holds and which needed events are missing.
 
@@ -101,7 +98,7 @@ def inventory(root):
         except NotAnEventLog as problem:
             reports.append({"path": path, "error": str(problem)})
             continue
-        missing = sorted(name for name in NEEDED if name not in counts)
+        missing = sorted(name for name in model.CONSUMES if name not in counts)
         reports.append({"path": path, "counts": counts, "missing": missing,
                         "lines": sum(counts.values())})
     if not reports:

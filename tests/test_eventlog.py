@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 
-from sjp import eventlog
+from sjp import eventlog, model
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
@@ -94,7 +94,7 @@ def check_inventory_names_what_is_missing():
         report = eventlog.inventory(path)[0]
         assert "SparkListenerTaskEnd" in report["missing"], report
         assert "SparkListenerJobStart" not in report["missing"], report
-        assert len(report["missing"]) == len(eventlog.NEEDED) - 1, report
+        assert len(report["missing"]) == len(model.CONSUMES) - 1, report
     finally:
         shutil.rmtree(root)
 
@@ -138,3 +138,17 @@ def check_an_unreadable_file_is_reported_rather_than_skipped():
         assert "counts" not in reports[0], reports
     finally:
         shutil.rmtree(root)
+
+
+def check_the_needed_list_is_the_model_and_not_a_copy_of_it():
+    """There is one list. A second one would be the thing that drifts."""
+    report = eventlog.inventory(_only_log(SKEWED))[0]
+    assert report["missing"] == [], report
+    for name in model.CONSUMES:
+        assert name in report["counts"], (name, sorted(report["counts"]))
+
+
+def check_profile_reads_a_path_and_builds_the_model():
+    app = eventlog.profile(_only_log(BALANCED))
+    assert app.name == "sjp-balanced", app.name
+    assert len(app.stages) == 3, app.stages
