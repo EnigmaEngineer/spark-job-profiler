@@ -4,9 +4,12 @@ The detector is not built yet. What this pins is the fixture. If somebody regene
 these logs at a smaller row count the skew and the spill quietly leave, and every later
 check would be grading a detector against a log with nothing in it.
 
-The arithmetic comes from `scripts/fixture_probe.py` so that there is one of it, and so a
-mutation pass over that file is graded here rather than being invisible.
+The arithmetic is `sjp.model` now. What is checked here is `scripts/fixture_probe.py`,
+which drives it and prints, and which the suite imports so a mutation pass over it is
+graded rather than invisible.
 """
+import contextlib
+import io
 import os
 import sys
 
@@ -14,6 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import fixture_probe  # noqa: E402
+
+from sjp import eventlog  # noqa: E402
 
 FIXTURES = os.path.join(ROOT, "tests", "fixtures", "eventlogs")
 
@@ -24,93 +29,75 @@ FIRST_STAGE_SPILL = (117440288, 61304287)
 GROUPING_STAGE = 2
 
 
-def _summary(job):
-    return fixture_probe.per_stage(fixture_probe.only_log(os.path.join(FIXTURES, job)))
+def _app(job):
+    return eventlog.profile(fixture_probe.only_log(os.path.join(FIXTURES, job)))
 
 
 def check_the_skewed_fixture_has_the_shuffle_volume_it_was_captured_with():
-    summary = _summary("skewed")
-    for stage, expected in SKEWED_RECORDS.items():
-        got = (summary[stage]["records_median"], summary[stage]["records_max"])
-        assert got == expected, (stage, got, expected)
+    app = _app("skewed")
+    for stage_id, expected in SKEWED_RECORDS.items():
+        stage = app.stage(stage_id)
+        got = (stage.median("records_read"), stage.largest("records_read"))
+        assert got == expected, (stage_id, got, expected)
 
 
 def check_the_balanced_fixture_has_the_shuffle_volume_it_was_captured_with():
-    summary = _summary("balanced")
-    for stage, expected in BALANCED_RECORDS.items():
-        got = (summary[stage]["records_median"], summary[stage]["records_max"])
-        assert got == expected, (stage, got, expected)
+    app = _app("balanced")
+    for stage_id, expected in BALANCED_RECORDS.items():
+        stage = app.stage(stage_id)
+        got = (stage.median("records_read"), stage.largest("records_read"))
+        assert got == expected, (stage_id, got, expected)
 
 
 def check_one_task_in_the_skewed_grouping_stage_reads_far_more_than_the_median():
-    row = _summary("skewed")[GROUPING_STAGE]
-    assert fixture_probe.ratio(row["records_median"], row["records_max"]) > 40, row
+    stage = _app("skewed").stage(GROUPING_STAGE)
+    assert stage.spread("records_read") > 40, stage.spread("records_read")
 
 
 def check_the_balanced_grouping_stage_is_nearly_even():
-    row = _summary("balanced")[GROUPING_STAGE]
-    assert fixture_probe.ratio(row["records_median"], row["records_max"]) < 1.5, row
+    stage = _app("balanced").stage(GROUPING_STAGE)
+    assert stage.spread("records_read") < 1.5, stage.spread("records_read")
 
 
 def check_the_skewed_grouping_stage_also_takes_far_longer_on_one_task():
     """A duration is a timing, so this is a floor rather than a pinned value."""
-    row = _summary("skewed")[GROUPING_STAGE]
-    assert fixture_probe.ratio(row["duration_median"], row["duration_max"]) > 5, row
+    stage = _app("skewed").stage(GROUPING_STAGE)
+    assert stage.spread("duration") > 5, stage.spread("duration")
 
 
 def check_the_balanced_grouping_stage_does_not():
-    row = _summary("balanced")[GROUPING_STAGE]
-    assert fixture_probe.ratio(row["duration_median"], row["duration_max"]) < 3, row
+    stage = _app("balanced").stage(GROUPING_STAGE)
+    assert stage.spread("duration") < 3, stage.spread("duration")
 
 
 def check_only_the_skewed_fixture_spills_in_the_grouping_stage():
-    skewed = _summary("skewed")[GROUPING_STAGE]
-    balanced = _summary("balanced")[GROUPING_STAGE]
-    assert skewed["memory_spilled"] == 620755808, skewed
-    assert skewed["disk_spilled"] == 88088795, skewed
-    assert balanced["memory_spilled"] == 0, balanced
-    assert balanced["disk_spilled"] == 0, balanced
+    skewed = _app("skewed").stage(GROUPING_STAGE)
+    balanced = _app("balanced").stage(GROUPING_STAGE)
+    assert skewed.total("memory_spilled") == 620755808, skewed.total("memory_spilled")
+    assert skewed.total("disk_spilled") == 88088795, skewed.total("disk_spilled")
+    assert balanced.total("memory_spilled") == 0, balanced.total("memory_spilled")
+    assert balanced.total("disk_spilled") == 0, balanced.total("disk_spilled")
 
 
 def check_both_fixtures_spill_identically_in_the_first_stage():
-    """The spill nobody should report.
+    """Not evidence of skew, and still a cost.
 
     Stage 0 is the same expression in both jobs and it spills the same bytes in both. A
-    detector that sums spill over an application would call the healthy job broken. The
-    two totals being equal to the byte is also the evidence that the two jobs differ in
-    one expression and nothing else.
+    detector that sums spill over an application says the same thing about both. The two
+    totals being equal to the byte is also the evidence that the two jobs differ in one
+    expression and nothing else.
     """
     for job in ("skewed", "balanced"):
-        row = _summary(job)[0]
-        assert (row["memory_spilled"], row["disk_spilled"]) == FIRST_STAGE_SPILL, (job, row)
+        stage = _app(job).stage(0)
+        got = (stage.total("memory_spilled"), stage.total("disk_spilled"))
+        assert got == FIRST_STAGE_SPILL, (job, got)
 
 
-def check_a_stage_that_shuffles_nothing_reads_as_zero_rather_than_raising():
-    """Stage 0 reads no shuffle records, so the guard in `ratio` is on a real path."""
-    row = _summary("skewed")[0]
-    assert row["records_median"] == 0, row
-    assert fixture_probe.ratio(row["records_median"], row["records_max"]) == 0.0, row
-
-
-def check_the_probe_refuses_a_log_with_no_tasks_in_it():
-    import shutil
-    import tempfile
-
-    from sjp import eventlog
-
-    root = tempfile.mkdtemp(prefix="sjp-notasks-")
-    try:
-        path = os.path.join(root, "thin")
-        with open(path, "w") as handle:
-            handle.write('{"Event":"SparkListenerJobStart"}\n')
-        try:
-            fixture_probe.per_stage(path)
-        except eventlog.NotAnEventLog:
-            pass
-        else:
-            raise AssertionError("a log with no task events was summarised anyway")
-    finally:
-        shutil.rmtree(root)
+def check_both_fixtures_were_captured_under_the_settings_the_job_module_still_declares():
+    for job in ("skewed", "balanced"):
+        properties = _app(job).properties
+        assert properties["spark.sql.shuffle.partitions"] == "8", properties
+        assert properties["spark.sql.adaptive.enabled"] == "false", properties
 
 
 def check_only_one_log_per_fixture_directory_is_accepted():
@@ -131,25 +118,89 @@ def check_only_one_log_per_fixture_directory_is_accepted():
         shutil.rmtree(root)
 
 
-def check_the_probe_runs_and_reports_success():
-    import contextlib
-    import io
-
+def check_the_probe_runs_and_its_controls_pass():
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         code = fixture_probe.main()
-    assert code == 0, code
-    assert "skewed" in out.getvalue() and "balanced" in out.getvalue(), out.getvalue()
+    text = out.getvalue()
+    assert code == 0, (code, text)
+    assert "skewed" in text and "balanced" in text, text
+    assert "0 disagree with the task sums" in text, text
+    assert "controls: 0 of 2 failed" in text, text
+    assert "NO" not in text, text
 
 
-def check_a_duration_and_a_record_count_are_not_the_same_number():
-    """Both are sorted out of the same task tuple and a swap would go unnoticed.
+def check_dropping_a_task_moves_the_totals_by_exactly_that_task():
+    """The control is arithmetic and not just a difference, so the numbers are pinned.
 
-    Every task in the second stage reads exactly 1,000,000 records in both jobs. No task
-    took anything like that many milliseconds.
+    The last task by index in the skewed grouping stage is the hot one. Take it out and
+    the stage still reports the run time of all eight while the tasks add up to seven.
     """
-    for job in ("skewed", "balanced"):
-        row = _summary(job)[1]
-        assert row["records_median"] == 1000000, (job, row)
-        assert row["duration_median"] < 10000, (job, row)
-        assert row["duration_max"] < 10000, (job, row)
+    stage = _app("skewed").stage(GROUPING_STAGE)
+    dropped = stage.tasks[-1]
+    rows = dict((name, (reported, summed)) for name, reported, summed
+                in fixture_probe.disagreement_from_dropping_a_task(stage))
+    assert rows["internal.metrics.executorRunTime"] == (4560, 4560 - dropped.executor_run_time), rows
+    assert rows["internal.metrics.memoryBytesSpilled"] == (620755808, 0), rows
+    assert dropped.memory_spilled == 620755808, dropped
+
+
+def check_a_stage_whose_totals_are_whole_produces_no_disagreement():
+    """Otherwise the control above could be reporting a difference that is always there."""
+    stage = _app("balanced").stage(1)
+    assert model_disagreements(stage) == [], model_disagreements(stage)
+
+
+def check_the_repeated_name_control_answers_both_ways():
+    stage = _app("skewed").stage(GROUPING_STAGE)
+    assert fixture_probe.refuses_a_repeated_name(stage) is True
+
+    import dataclasses
+    kept = tuple(total for total in stage.totals
+                 if total.name != fixture_probe.REPEATED_NAME)
+    assert fixture_probe.refuses_a_repeated_name(
+        dataclasses.replace(stage, totals=kept)) is False
+
+
+def check_the_probe_counts_the_controls_that_failed():
+    """A count rather than a flag, because only the truthiness used to be read."""
+    assert fixture_probe.failures_in([("a", True, ""), ("b", True, "")]) == 0
+    assert fixture_probe.failures_in([("a", False, ""), ("b", True, "")]) == 1
+    assert fixture_probe.failures_in([("a", False, ""), ("b", False, "")]) == 2
+
+
+def check_the_probe_runs_both_controls_on_the_stage_that_spilled():
+    """Naming the stage matters. Only the grouping stage has a spill total to come apart."""
+    results = fixture_probe.controls(_app("skewed"))
+    assert len(results) == 2, results
+    assert fixture_probe.failures_in(results) == 0, results
+    assert "internal.metrics.memoryBytesSpilled" in results[0][2], results[0]
+
+
+def check_the_probe_exit_code_is_reachable_from_both_sides():
+    assert fixture_probe.exit_code(0) == 0
+    assert fixture_probe.exit_code(1) == 1
+    assert fixture_probe.exit_code(2) == 1
+
+
+def check_the_probe_counts_the_totals_the_two_fixtures_actually_carry():
+    """Same code, different key sets, because a total that stayed at zero is left out."""
+    assert fixture_probe.agreement(_app("skewed"))[:2] == (24, 12)
+    assert fixture_probe.agreement(_app("balanced"))[:2] == (22, 14)
+
+
+def check_the_probe_reports_a_disagreement_it_is_given():
+    import dataclasses
+
+    app = _app("skewed")
+    stage = app.stage(GROUPING_STAGE)
+    damaged = dataclasses.replace(app, stages=(dataclasses.replace(
+        stage, tasks=stage.tasks[:-1]),))
+    _present, _absent, off = fixture_probe.agreement(damaged)
+    assert off, off
+    assert all(row[0] == GROUPING_STAGE for row in off), off
+
+
+def model_disagreements(stage):
+    from sjp import model
+    return model.disagreements(stage)

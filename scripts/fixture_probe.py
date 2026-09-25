@@ -1,23 +1,22 @@
-"""Print what the committed fixtures hold, per stage.
+"""Print what the committed fixtures hold, per stage, and check the stage totals.
 
     python scripts/fixture_probe.py
 
-The arithmetic lives here rather than in the document that publishes it, and
-`tests/test_fixture_pathologies.py` imports it, so a mutation pass over this file is
-graded by the suite. That is the whole reason it is not a block of code inside the
-printing loop.
+This drives and prints. Every number it shows comes out of `sjp.model`, which the suite
+imports and a mutation pass grades. On the first day of this repo the arithmetic lived
+here instead, because there was no model to put it in. There is one now.
 
-This is not the profiler. The stage and task model is the next thing to build and it will
-not look like this. What this exists for is to say whether the fixtures still carry the
-pathologies they were captured for.
+The controls at the end matter more than the table. A run reporting that twelve stage
+totals agree with the tasks is the same output a run comparing nothing would print, so
+the probe damages a stage on purpose and fails if the disagreement is not found.
 """
+import dataclasses
 import os
-import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sjp import eventlog  # noqa: E402
+from sjp import eventlog, model  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "tests", "fixtures", "eventlogs")
@@ -30,59 +29,116 @@ def only_log(directory):
     return os.path.join(directory, names[0])
 
 
-def per_stage(path):
-    """Median and max task duration and shuffle records, plus spill totals, by stage."""
-    tasks = {}
-    for event in eventlog.read_events(path):
-        if event.get("Event") != "SparkListenerTaskEnd":
-            continue
-        info = event["Task Info"]
-        metrics = event["Task Metrics"]
-        tasks.setdefault(event["Stage ID"], []).append((
-            info["Finish Time"] - info["Launch Time"],
-            metrics["Shuffle Read Metrics"]["Total Records Read"],
-            metrics["Memory Bytes Spilled"],
-            metrics["Disk Bytes Spilled"],
-        ))
-    if not tasks:
-        raise eventlog.NotAnEventLog("{} holds no task events".format(path))
-
-    summary = {}
-    for stage, rows in tasks.items():
-        durations = sorted(row[0] for row in rows)
-        records = sorted(row[1] for row in rows)
-        summary[stage] = {
-            "tasks": len(rows),
-            "duration_median": statistics.median(durations),
-            "duration_max": max(durations),
-            "records_median": statistics.median(records),
-            "records_max": max(records),
-            "memory_spilled": sum(row[2] for row in rows),
-            "disk_spilled": sum(row[3] for row in rows),
-        }
-    return summary
+def report(job, app):
+    lines = []
+    for stage in app.stages:
+        lines.append("{:<9} stage {}  tasks {} of {}".format(
+            job, stage.stage_id, len(stage.tasks), stage.declared_tasks))
+        lines.append("    records   median {}  max {}  spread {:.2f}".format(
+            stage.median("records_read"), stage.largest("records_read"),
+            stage.spread("records_read")))
+        lines.append("    duration  median {} ms  max {} ms  spread {:.2f}".format(
+            stage.median("duration"), stage.largest("duration"), stage.spread("duration")))
+        lines.append("    spilled   {} memory  {} disk".format(
+            stage.total("memory_spilled"), stage.total("disk_spilled")))
+        lines.append("    peak      {} largest task  {} summed by the stage".format(
+            stage.peak_memory,
+            stage.reported_total("internal.metrics.peakExecutionMemory")))
+    return lines
 
 
-def ratio(smaller, larger):
-    """Guarded so a stage that shuffles nothing reads as 0 rather than raising."""
-    return 0.0 if smaller == 0 else larger / smaller
+def agreement(app):
+    """How many mapped totals the stage reported, how many it left out, and any that differ."""
+    present = absent = 0
+    off = []
+    for stage in app.stages:
+        for name, reported, summed in model.totals_against_tasks(stage):
+            if stage.reported_total(name):
+                present += 1
+            else:
+                absent += 1
+            if reported != summed:
+                off.append((stage.stage_id, name, reported, summed))
+    return present, absent, off
+
+
+REPEATED_NAME = "internal.metrics.executorRunTime"
+
+
+def disagreement_from_dropping_a_task(stage):
+    """What stops matching when one task is taken out of a stage.
+
+    The stage keeps the total the log reported and loses a task from the sum, so every
+    metric that task contributed to has to come apart. A run where this returns nothing
+    is a run where the comparison is not comparing.
+    """
+    fewer = dataclasses.replace(stage, tasks=stage.tasks[:-1])
+    return model.disagreements(fewer)
+
+
+def refuses_a_repeated_name(stage):
+    """Whether asking for a total by a name that appears twice raises rather than answers."""
+    doubled = dataclasses.replace(stage, totals=stage.totals + stage.totals)
+    try:
+        doubled.reported_total(REPEATED_NAME)
+    except model.UnexpectedLog:
+        return True
+    return False
+
+
+def controls(app):
+    """Two ways the agreement line could be printed by something checking nothing."""
+    stage = app.stages[-1]
+    off = disagreement_from_dropping_a_task(stage)
+    return [
+        ("a stage missing one task disagrees", bool(off),
+         ", ".join(name for name, _reported, _summed in off)),
+        ("a repeated total name is refused", refuses_a_repeated_name(stage), ""),
+    ]
+
+
+def failures_in(results):
+    """How many controls did not do what they exist to do."""
+    failed = 0
+    for _label, ok, _detail in results:
+        if not ok:
+            failed += 1
+    return failed
+
+
+def exit_code(failed):
+    """Separate from `main` so both answers are reachable from a check.
+
+    A healthy run never takes the failing branch, so leaving the arithmetic inside `main`
+    leaves half of it ungraded.
+    """
+    return 1 if failed else 0
 
 
 def main():
+    apps = {}
     for job in ("skewed", "balanced"):
-        summary = per_stage(only_log(os.path.join(FIXTURES, job)))
-        for stage in sorted(summary):
-            row = summary[stage]
-            print("{:<9} stage {}  tasks {}".format(job, stage, row["tasks"]))
-            print("    records   median {}  max {}  ratio {:.2f}".format(
-                row["records_median"], row["records_max"],
-                ratio(row["records_median"], row["records_max"])))
-            print("    duration  median {} ms  max {} ms  ratio {:.2f}".format(
-                row["duration_median"], row["duration_max"],
-                ratio(row["duration_median"], row["duration_max"])))
-            print("    spilled   {} memory  {} disk".format(
-                row["memory_spilled"], row["disk_spilled"]))
-    return 0
+        app = eventlog.profile(only_log(os.path.join(FIXTURES, job)))
+        apps[job] = app
+        for line in report(job, app):
+            print(line)
+
+    for job in ("skewed", "balanced"):
+        present, absent, off = agreement(apps[job])
+        print("{:<9} stage totals: {} present, {} absent, {} disagree with the task sums"
+              .format(job, present, absent, len(off)))
+        for stage_id, name, reported, summed in off:
+            print("    stage {} {} reports {} against {}".format(
+                stage_id, name, reported, summed))
+
+    results = controls(apps["skewed"])
+    for label, ok, detail in results:
+        print("control, {}: {}".format(label, "yes" if ok else "NO"))
+        if detail:
+            print("    {}".format(detail))
+    failed = failures_in(results)
+    print("controls: {} of {} failed".format(failed, len(results)))
+    return exit_code(failed)
 
 
 if __name__ == "__main__":
