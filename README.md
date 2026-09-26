@@ -12,9 +12,9 @@ That needs nothing but the standard library. Capturing a fresh log needs pyspark
 
 ## Where it is
 
-The parser and the stage and task model are built, and there are two committed logs to
-build against. The skew detector and the recommendations are not, so `sjp stages` prints
-measurements and never a verdict about one.
+The parser, the stage and task model and the skew detector are built, against two committed
+logs. The spill analysis and the recommendations are not. `sjp stages` still prints
+measurements and no verdict about any of them, because the verdicts live in `sjp skew`.
 
 ## One entry point, and every command says what it does to state
 
@@ -23,6 +23,7 @@ $ python -m sjp commands
 {
   "capture": "write",
   "inventory": "read",
+  "skew": "read",
   "stages": "read"
 }
 ```
@@ -46,6 +47,7 @@ mapping, which is what a guard reads:
 {
   "capture": "write",
   "inventory": "read",
+  "skew": "read",
   "stages": "read"
 }
 reads that changed the store: none
@@ -87,7 +89,7 @@ Measured on this machine under pyspark 3.5.6 and OpenJDK 11.0.32.1.
 
 ```
 skewed    stage 0  tasks 2 of 2
-    records   median 0.0  max 0  spread 0.00
+    records   median 0.0  max 0  spread no median to divide by
     duration  median 3886.0 ms  max 3895 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
     peak      0 largest task  0 summed by the stage
@@ -102,7 +104,7 @@ skewed    stage 2  tasks 8 of 8
     spilled   620755808 memory  88088795 disk
     peak      377486768 largest task  562035856 summed by the stage
 balanced  stage 0  tasks 2 of 2
-    records   median 0.0  max 0  spread 0.00
+    records   median 0.0  max 0  spread no median to divide by
     duration  median 3671.5 ms  max 3686 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
     peak      0 largest task  0 summed by the stage
@@ -157,7 +159,7 @@ local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
   shuffle partitions 8
   stage 0  2 of 2 tasks  4044 ms wall
       duration ms   median 3886.0  max 3895  spread 1.00
-      records read  median 0.0  max 0  spread 0.00
+      records read  median 0.0  max 0  spread no median to divide by
       outside run   median 101.5  max 103  spread 1.01
       spilled       117440288 memory  61304287 disk
       peak memory   0 largest task  0 summed by the stage
@@ -179,7 +181,10 @@ local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
 ```
 
 Nothing there is a verdict. A spread of 44.22 is a measurement beside the thing it should
-be compared against, and deciding that it is a problem is the detector's job.
+be compared against, and deciding that it is a problem belongs to `sjp skew`.
+
+Stage 0 reads `no median to divide by` rather than a number. That is the subject of the
+next section and it is the only line here that is not a measurement.
 
 ### The events it reads are the events it registers
 
@@ -210,20 +215,107 @@ and the balanced job's stage total is more than twice the skewed job's while the
 job spilled nothing. `docs/adr-0002-what-a-stage-total-can-and-cannot-say.md` has the
 numbers and the two other traps in that list.
 
+## Naming the stage that skewed
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/*
+local-1790267120237  sjp-skewed  threshold 4.0  9 verdicts
+  undecided stage 0  records_read       no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  duration           no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  memory_spilled     no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  even      stage 1  records_read         1.0000  largest task 1000000 against a median of 1000000
+  even      stage 1  duration             1.7378  largest task 855 against a median of 492
+  undecided stage 1  memory_spilled     no ratio  every task reads zero, so there is no spread
+  skewed    stage 2  records_read        44.2179  largest task 6932663 against a median of 156784
+  skewed    stage 2  duration            14.7246  largest task 3048 against a median of 207
+  skewed    stage 2  memory_spilled    unbounded  more than half the tasks read zero and one reads 620755808
+  3 skewed, 2 even, 4 undecided
+  worst  stage 2 on memory_spilled at unbounded
+```
+
+The same command on the balanced log, which differs from the skewed one in one expression.
+
+```
+  0 skewed, 4 even, 5 undecided
+  nothing skewed at this threshold
+```
+
+It exits 1 when something skewed, so a shell can act on the answer.
+
+### There is a third verdict and it carried the day
+
+A verdict is `skewed` or `even` or `undecided`. The third one is the addition.
+
+Four of the nine verdicts on the skewed log are `undecided` and none is a gap in the tool.
+Three are the two task stage. With two tasks the largest value is one of the two the median
+averages, so the ratio is `2b / (a + b)` and it cannot reach 2 however extreme the pair.
+That was searched rather than assumed.
+
+```
+n=1   values [1]*0 + [1e6] -> spread 1.0000
+n=2   values [1]*1 + [1e6] -> spread 2.0000
+n=3   values [1]*2 + [1e6] -> spread 1000000.0000
+```
+
+So a stage below three tasks gets no verdict rather than a reassuring one. The fourth
+`undecided` is a spill metric no task moved, which is a different answer from a spill that
+was spread evenly.
+
+### The zero median was answering 0.0 and that was the worst available answer
+
+`Stage.spread` returned 0.0 when the median was zero, on the grounds that dividing by zero
+would raise. That reads as perfectly even. On the skewed job's grouping stage it was
+describing this.
+
+```
+memory_spilled   sorted=[0, 0, 0, 0, 0, 0, 0, 620755808]  median=0.0  max=620755808  1 of 8 tasks non zero
+disk_spilled     sorted=[0, 0, 0, 0, 0, 0, 0, 88088795]  median=0.0  max=88088795  1 of 8 tasks non zero
+gc_time          sorted=[0, 0, 0, 0, 0, 0, 0, 71]  median=0.0  max=71  1 of 8 tasks non zero
+```
+
+One task of eight spilled and the other seven spilled nothing. A profiler calling that
+stage even on its spill would be wrong about the only thing the file was captured to show.
+
+`Stage.spread` returns None there now. None raises when it is compared against a threshold,
+which is why it was picked over 0.0 and over an exception. A caller that forgets gets a
+stack trace instead of a wrong answer. When the median is zero and the maximum is not,
+`sjp skew` answers `skewed` and records the ratio as unbounded.
+
+This was expected to need a constructed fixture. It fires on captured data instead.
+
+### Where the threshold came from
+
+Over both logs, on every stage with enough tasks to answer, across three metrics.
+
+```
+largest healthy: ['1.7407 skewed stage 1 executor_run_time', '1.7378 skewed stage 1 duration', '1.5747 balanced stage 1 executor_run_time']
+smallest guilty: ['14.7246 skewed stage 2 duration', '16.0422 skewed stage 2 executor_run_time', '44.2179 skewed stage 2 records_read']
+default threshold 4.0 sits between 1.7407 and 14.7246
+```
+
+Any value between 1.7407 and 14.7246 behaves identically on every stage here. Two logs
+bound the threshold and do not determine it, so the default is 4.0 and the range is
+published next to it. A check asserts the default stays inside the measured range, so a
+fixture that narrows it fails the suite rather than quietly invalidating the constant.
+
+`docs/adr-0003-what-a-median-relative-threshold-cannot-say.md` has the rejected options.
+
 ## Running the checks
 
 ```
 $ python tests/run_all.py
-114 passed, 0 failed, 114 checks
+148 passed, 0 failed, 148 checks
 ```
 
 Every check is graded by a mutation pass rather than counted.
 
 ```
-sjp/model.py: 34 mutation sites, running 0 to 34
-34 killed, 0 survived, 0 ungraded, 34 graded
-sjp/commands.py: 20 mutation sites, running 0 to 20
+sjp/skew.py: 20 mutation sites, running 0 to 20
 20 killed, 0 survived, 0 ungraded, 20 graded
+sjp/model.py: 35 mutation sites, running 0 to 35
+35 killed, 0 survived, 0 ungraded, 35 graded
+sjp/commands.py: 24 mutation sites, running 0 to 24
+24 killed, 0 survived, 0 ungraded, 24 graded
 sjp/eventlog.py: 9 mutation sites, running 0 to 9
 9 killed, 0 survived, 0 ungraded, 9 graded
 sjp/cli.py: 18 mutation sites, running 0 to 18
@@ -273,6 +365,17 @@ argues that they are uninteresting.
 The model keeps every task of every stage. Both committed logs hold eighteen tasks. What
 this costs on a log from a job with a million tasks has not been measured, so nothing here
 claims it is fine.
+
+One threshold covers every metric. A spill ratio and a duration ratio almost certainly do
+not deserve the same constant. Nothing measured here says what the difference should be, so
+per metric thresholds wait for a log that argues for one.
+
+`undecided` is five of nine verdicts on the healthy job. That is a high proportion for a
+detector and it is a property of these fixtures rather than of the rule. A real job with two
+hundred partitions per stage would clear the task floor everywhere.
+
+The detector reads task fields and never a stage total, so the twelve of thirty seven above
+changes no verdict today. A recommendation that reads a stage total will change that.
 
 `sjp stages` reports a stage that was submitted and never completed with whatever the log
 holds for it. A job that died mid stage is a real thing to be handed, and the timings for

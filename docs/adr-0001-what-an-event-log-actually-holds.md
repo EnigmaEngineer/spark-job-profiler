@@ -79,7 +79,7 @@ detection, is only in the task events.
 
 ```
 skewed    stage 0  tasks 2 of 2
-    records   median 0.0  max 0  spread 0.00
+    records   median 0.0  max 0  spread no median to divide by
     duration  median 3886.0 ms  max 3895 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
     peak      0 largest task  0 summed by the stage
@@ -94,7 +94,7 @@ skewed    stage 2  tasks 8 of 8
     spilled   620755808 memory  88088795 disk
     peak      377486768 largest task  562035856 summed by the stage
 balanced  stage 0  tasks 2 of 2
-    records   median 0.0  max 0  spread 0.00
+    records   median 0.0  max 0  spread no median to divide by
     duration  median 3671.5 ms  max 3686 ms  spread 1.00
     spilled   117440288 memory  61304287 disk
     peak      0 largest task  0 summed by the stage
