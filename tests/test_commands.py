@@ -11,10 +11,11 @@ import shutil
 import sys
 import tempfile
 
-from sjp import cli, commands, eventlog, model
+from sjp import cli, commands, eventlog, model, skew
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
+BALANCED = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
 
 
 @contextlib.contextmanager
@@ -187,8 +188,54 @@ def check_the_commands_word_refuses_trailing_arguments_and_names_them():
 def check_the_mapping_is_printed_at_the_indent_that_ships():
     _code, text = _run(["commands"])
     expected = ('{\n  "capture": "write",\n  "inventory": "read",'
-                '\n  "stages": "read"\n}\n')
+                '\n  "skew": "read",\n  "stages": "read"\n}\n')
     assert text == expected, repr(text)
+
+
+def _only_log(directory):
+    names = [n for n in sorted(os.listdir(directory)) if not n.endswith(".md")]
+    assert len(names) == 1, names
+    return os.path.join(directory, names[0])
+
+
+def check_skew_exits_one_on_the_skewed_log_and_zero_on_the_balanced_one():
+    """The status is the part a shell reads, so it is the part worth pinning.
+
+    A command that prints a finding and exits 0 is a command nothing downstream can act
+    on, and the printed lines would still look right.
+    """
+    guilty, _text = _run(["skew", _only_log(SKEWED)])
+    clean, _text = _run(["skew", _only_log(BALANCED)])
+    assert guilty == 1, guilty
+    assert clean == 0, clean
+
+
+def check_skew_names_the_worst_stage_or_says_nothing_skewed():
+    _code, guilty = _run(["skew", _only_log(SKEWED)])
+    _code, clean = _run(["skew", _only_log(BALANCED)])
+    assert guilty.strip().splitlines()[-1].strip().startswith("worst  stage 2"), guilty
+    assert clean.strip().splitlines()[-1].strip() == "nothing skewed at this threshold", clean
+
+
+def check_skew_prints_one_line_per_stage_and_metric_plus_three():
+    """The header, the tally and the worst line. A dropped row would otherwise be invisible."""
+    app = eventlog.profile(_only_log(SKEWED))
+    _code, text = _run(["skew", _only_log(SKEWED)])
+    expected = len(app.stages) * len(skew.DEFAULT_METRICS) + 3
+    assert len(text.strip().splitlines()) == expected, text
+
+
+def check_the_skew_threshold_can_be_overridden_from_the_command_line():
+    _code, wide = _run(["skew", _only_log(SKEWED), "--threshold", "100"])
+    assert "nothing skewed" not in wide, wide
+    assert "0 skewed" not in wide, wide
+
+
+def check_skew_takes_one_metric_when_asked_for_one():
+    stages = len(eventlog.profile(_only_log(SKEWED)).stages)
+    _code, text = _run(["skew", _only_log(SKEWED), "--metric", "duration"])
+    assert "records_read" not in text, text
+    assert len(text.strip().splitlines()) == stages + 3, text
 
 
 def check_the_capture_parser_requires_a_job():

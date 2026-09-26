@@ -10,7 +10,7 @@ one, so its parser is the only part of it anything can reach.
 import argparse
 import os
 
-from sjp import eventlog, model
+from sjp import eventlog, model, skew
 from sjp.cli import READ, WRITE, command
 
 CAPTURE_DEFAULT_ROWS = 2000000
@@ -133,6 +133,68 @@ def stages(rest):
     for line in stage_lines(eventlog.profile(args.path)):
         print(line)
     return 0
+
+
+def skew_parser():
+    parser = argparse.ArgumentParser(prog="sjp skew")
+    parser.add_argument("path", help="one event log file")
+    parser.add_argument("--threshold", type=float, default=skew.DEFAULT_THRESHOLD,
+                        help="largest task over the median, above which a stage is skewed")
+    parser.add_argument("--metric", action="append", dest="metrics",
+                        help="a task field to judge, repeatable")
+    return parser
+
+
+def ratio_text(verdict):
+    """A verdict's ratio for printing.
+
+    Three cases and each of them needs its own words. `inf` formatted as a float prints
+    `inf`, which looks like a bug in the profiler rather than a fact about the stage.
+    """
+    if verdict.ratio is None:
+        return "no ratio"
+    if verdict.unbounded:
+        return "unbounded"
+    return "{:.4f}".format(verdict.ratio)
+
+
+def skew_lines(app, verdicts, threshold):
+    """Every verdict, then the tally, then the one to look at first.
+
+    Takes the verdicts rather than computing them, so the lines and the command's exit
+    status cannot come from two separate scans that disagree.
+
+    The tally is printed even when it is all zeros in a column, because a summary that
+    drops an empty outcome is a summary that cannot report the absence of a problem.
+    """
+    lines = ["{}  {}  threshold {}  {}".format(
+        app.app_id, app.name, threshold, counted(len(verdicts), "verdict"))]
+    for verdict in verdicts:
+        lines.append("  {:<9} stage {}  {:<16} {:>10}  {}".format(
+            verdict.outcome, verdict.stage_id, verdict.metric,
+            ratio_text(verdict), verdict.why))
+    tally = skew.counts(verdicts)
+    lines.append("  {} skewed, {} even, {} undecided".format(
+        tally[skew.SKEWED], tally[skew.EVEN], tally[skew.UNDECIDED]))
+    first = skew.worst(verdicts)
+    lines.append("  nothing skewed at this threshold" if first is None else
+                 "  worst  stage {} on {} at {}".format(
+                     first.stage_id, first.metric, ratio_text(first)))
+    return lines
+
+
+@command("skew", READ, "which stages skewed, against a median relative threshold",
+         probe=lambda store: [_first_log(store)])
+def skew_command(rest):
+    args = skew_parser().parse_args(rest)
+
+    metrics = tuple(args.metrics) if args.metrics else skew.DEFAULT_METRICS
+    app = eventlog.profile(args.path)
+    verdicts = skew.scan(app, metrics, args.threshold)
+    for line in skew_lines(app, verdicts, args.threshold):
+        print(line)
+    # Exit 1 when something skewed, so this is usable from a shell that checks a status.
+    return 1 if skew.counts(verdicts)[skew.SKEWED] else 0
 
 
 @command("capture", WRITE, "run a sample job and keep its event log")
