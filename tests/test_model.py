@@ -155,11 +155,23 @@ def check_the_records_and_the_durations_are_not_the_same_column():
         assert stage.largest("duration") < 10000, stage.largest("duration")
 
 
-def check_a_stage_that_reads_nothing_spreads_as_zero_rather_than_raising():
+def check_a_stage_with_no_median_has_no_spread_rather_than_a_spread_of_zero():
+    """It answered 0.0 before the detector was written, which reads as perfectly even.
+
+    The stage picked here is the harmless case, where the maximum is zero too. The one
+    that made the old answer wrong is the skewed grouping stage's spill, and that lives in
+    `tests/test_skew.py` beside the detector it would have fooled.
+    """
     stage = _app(SKEWED).stage(0)
     assert stage.median("records_read") == 0, stage.median("records_read")
-    assert stage.spread("records_read") == 0.0, stage.spread("records_read")
+    assert stage.spread("records_read") is None, stage.spread("records_read")
     assert stage.spread("duration") > 0, stage.spread("duration")
+
+
+def check_the_absent_spread_is_printed_as_words_rather_than_as_a_blank():
+    stage = _app(SKEWED).stage(0)
+    assert model.spread_text(stage, "records_read") == "no median to divide by"
+    assert model.spread_text(stage, "duration") == "1.00", model.spread_text(stage, "duration")
 
 
 def check_the_spread_is_the_largest_over_the_median():

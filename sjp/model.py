@@ -126,14 +126,17 @@ class Stage:
         return max(self.values(name))
 
     def spread(self, name):
-        """Largest over median. Zero when the median is zero.
+        """Largest over median, or None when the median is zero.
 
-        A stage that reads nothing has a median of zero and dividing by it would raise,
-        so the answer there is zero rather than an exception. Day to day this is the
-        number a skew rule will be built on and it is not itself a rule.
+        It answered 0.0 before the detector was written and that was wrong in the worst
+        available direction. On the skewed log's grouping stage the median spill is 0 and
+        one task of eight spilled 620,755,808 bytes, so the number read as perfectly even
+        for the most lopsided stage in the repo. None cannot be compared against a
+        threshold without raising, which is the point of it. `sjp.skew` is where the case
+        gets an answer instead of a summary.
         """
         middle = self.median(name)
-        return 0.0 if middle == 0 else self.largest(name) / middle
+        return None if middle == 0 else self.largest(name) / middle
 
     @property
     def peak_memory(self):
@@ -157,6 +160,19 @@ class Stage:
             raise UnexpectedLog("{} appears {} times on stage {}".format(
                 name, len(found), self.stage_id))
         return found[0] if found else 0
+
+
+def spread_text(stage, name):
+    """A stage's spread for printing, and the reason when there is not one.
+
+    Lives here rather than with the two scripts that print it. The words are a statement
+    about `Stage.spread` returning None, so anyone changing that convention should have to
+    walk past them. Formatting None as a float raises, which is the whole point of None,
+    and a line of output is the one place the absence has to be spelled out because a
+    reader who sees a blank will supply their own explanation.
+    """
+    ratio = stage.spread(name)
+    return "no median to divide by" if ratio is None else "{:.2f}".format(ratio)
 
 
 @dataclass(frozen=True)

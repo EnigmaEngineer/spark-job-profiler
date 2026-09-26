@@ -34,11 +34,12 @@ def report(job, app):
     for stage in app.stages:
         lines.append("{:<9} stage {}  tasks {} of {}".format(
             job, stage.stage_id, len(stage.tasks), stage.declared_tasks))
-        lines.append("    records   median {}  max {}  spread {:.2f}".format(
+        lines.append("    records   median {}  max {}  spread {}".format(
             stage.median("records_read"), stage.largest("records_read"),
-            stage.spread("records_read")))
-        lines.append("    duration  median {} ms  max {} ms  spread {:.2f}".format(
-            stage.median("duration"), stage.largest("duration"), stage.spread("duration")))
+            model.spread_text(stage, "records_read")))
+        lines.append("    duration  median {} ms  max {} ms  spread {}".format(
+            stage.median("duration"), stage.largest("duration"),
+            model.spread_text(stage, "duration")))
         lines.append("    spilled   {} memory  {} disk".format(
             stage.total("memory_spilled"), stage.total("disk_spilled")))
         lines.append("    peak      {} largest task  {} summed by the stage".format(

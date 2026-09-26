@@ -71,8 +71,8 @@ def stage_lines(app):
             stage.stage_id, len(stage.tasks), stage.declared_tasks, stage.wall_time))
         for label, name in (("duration ms", "duration"), ("records read", "records_read"),
                             ("outside run", "outside_run_time")):
-            lines.append("      {:<13} median {}  max {}  spread {:.2f}".format(
-                label, stage.median(name), stage.largest(name), stage.spread(name)))
+            lines.append("      {:<13} median {}  max {}  spread {}".format(
+                label, stage.median(name), stage.largest(name), model.spread_text(stage, name)))
         lines.append("      {:<13} {} memory  {} disk".format(
             "spilled", stage.total("memory_spilled"), stage.total("disk_spilled")))
         lines.append("      {:<13} {} largest task  {} summed by the stage".format(
