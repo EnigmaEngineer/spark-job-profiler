@@ -27,9 +27,17 @@ The 1.7407 is worth one more line. The first version of this docstring said 1.73
 the largest duration ratio, because that was the column being read at the time. Executor run
 time on the same stage is higher. The check in `tests/test_skew.py` searches all three
 metrics and it is what found the wrong number.
+
+**The metric set is not a choice this module gets to make.** It was three names for one day
+and that was long enough to be wrong. `model.QUANTITIES` is the set now, derived from the
+kind declared on every field of the task record. The separating range above is still quoted
+over the three metrics it was measured on, because widening it is a measurement and not a
+rename. `tests/test_skew.py` recomputes it.
 """
 import math
 from dataclasses import dataclass
+
+from sjp import model
 
 SKEWED = "skewed"
 EVEN = "even"
@@ -43,10 +51,36 @@ DEFAULT_THRESHOLD = 4.0
 # is in the module docstring and `tests/test_skew.py` measures it rather than trusting it.
 MIN_TASKS = 3
 
-# The metrics `sjp skew` looks at unless told otherwise. Shuffle records is the classic
-# skew, wall time is what a person actually noticed, and spill is the one whose median is
-# zero on the skewed log.
-DEFAULT_METRICS = ("records_read", "duration", "memory_spilled")
+# How large the biggest task has to be before a ratio over it is worth printing, per unit.
+#
+# This exists because widening the metric set broke the control. The balanced log, which is
+# the fixture whose job is to have nothing wrong with it, reported one skewed stage. It was
+# a result serialization time of 8 milliseconds against a median of zero. The zero median
+# rule cannot tell that from the 620,755,808 byte spill it was written for, because the
+# ratio is unbounded in both cases and a ratio carries no unit.
+#
+# Milliseconds are bounded on both sides by the two logs. The largest value that is noise is
+# 29 and the smallest that is real is 71, so 50 sits between them with room either way.
+#
+# Bytes and counts are bounded on one side only. Neither log produces a byte or a record
+# verdict small enough to be noise, so nothing here measures where that floor belongs and
+# None means no floor rather than a number I would have invented. The cost is stated in
+# docs/adr-0004 and a byte case small enough to be noise would be a reason to revisit.
+FLOORS = {
+    model.MILLIS: 50,
+    model.BYTES: None,
+    model.COUNT: None,
+}
+
+# Every quantity a task carries, because the alternative was a list of three I chose.
+#
+# It used to be records read and wall time and memory spill. Those are the three a person
+# names first and that is the reason they were wrong. A stage skewed only on disk spill or
+# on remote bytes read got no verdict, and the command's exit status is computed over
+# whatever was judged, so a real skew outside the three read as a clean run. The set now
+# comes from the kind declared on each field of `model.Task`. Judging a metric nobody
+# cares about costs one line of output. Skipping one costs the answer.
+DEFAULT_METRICS = model.QUANTITIES
 
 
 def plain(value):
@@ -83,7 +117,13 @@ class Verdict:
         return self.ratio is not None and math.isinf(self.ratio)
 
 
-def judge(stage, metric, threshold=DEFAULT_THRESHOLD):
+def floor_for(metric, floors=None):
+    """The magnitude below which `metric` is not worth a verdict, or None for no floor."""
+    floors = FLOORS if floors is None else floors
+    return floors.get(model.kind_of(metric))
+
+
+def judge(stage, metric, threshold=DEFAULT_THRESHOLD, floors=None):
     """Whether `stage` skewed on `metric`, or why that question has no answer here.
 
     Deliberately does not call `Stage.spread`. That property answers None on a zero median
@@ -111,6 +151,13 @@ def judge(stage, metric, threshold=DEFAULT_THRESHOLD):
                       "{} tasks, and below {} the ratio cannot pass 2".format(tasks, MIN_TASKS))
     if largest == 0:
         return answer(UNDECIDED, None, "every task reads zero, so there is no spread")
+    floor = floor_for(metric, floors)
+    if floor is not None and largest < floor:
+        # Before the ratio, because an unbounded ratio over a small number is the case this
+        # is here for and it would otherwise be answered before anything measured it.
+        return answer(UNDECIDED, None,
+                      "largest task {} is under the {} floor of {}".format(
+                          plain(largest), model.kind_of(metric), plain(floor)))
     if median == 0:
         return answer(SKEWED, math.inf,
                       "more than half the tasks read zero and one reads {}".format(largest))
@@ -123,9 +170,9 @@ def judge(stage, metric, threshold=DEFAULT_THRESHOLD):
         plain(largest), plain(median)))
 
 
-def scan(app, metrics=DEFAULT_METRICS, threshold=DEFAULT_THRESHOLD):
+def scan(app, metrics=DEFAULT_METRICS, threshold=DEFAULT_THRESHOLD, floors=None):
     """Every stage against every metric, in stage order."""
-    return [judge(stage, metric, threshold)
+    return [judge(stage, metric, threshold, floors)
             for stage in app.stages for metric in metrics]
 
 
@@ -141,14 +188,36 @@ def counts(verdicts):
     return tally
 
 
-def worst(verdicts):
-    """The skewed verdict to act on first, or None when nothing skewed.
+def worst(verdicts, kind):
+    """The skewed verdict to act on first within one unit, or None when nothing skewed.
+
+    Takes a kind because a ratio carries no unit and a single answer across units is a
+    comparison this module cannot make. Ranking every skewed verdict together put a
+    seventy one millisecond garbage collection level with a 620,755,808 byte spill. Both
+    are unbounded and both are on the same stage, so the answer was whichever the metric
+    order reached first. Concentration does not separate them either. One task did all of
+    both.
 
     An unbounded ratio sorts above every finite one, because a stage where most tasks did
     nothing is worse than one that is merely lopsided. Ties break on the stage id so the
     answer does not depend on the order the metrics were asked for.
     """
-    skewed = [v for v in verdicts if v.outcome == SKEWED]
+    skewed = [v for v in verdicts
+              if v.outcome == SKEWED and model.kind_of(v.metric) == kind]
     if not skewed:
         return None
     return max(skewed, key=lambda v: (v.ratio, -v.stage_id))
+
+
+def worst_by_kind(verdicts):
+    """One worst verdict per unit that has a skewed verdict, in declared kind order.
+
+    The unit is part of the answer rather than something a reader supplies. A report
+    naming one worst stage across every metric is naming the metric order.
+    """
+    found = {}
+    for kind in model.MEASURED:
+        first = worst(verdicts, kind)
+        if first is not None:
+            found[kind] = first
+    return found

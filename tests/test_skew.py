@@ -188,9 +188,15 @@ def check_the_threshold_is_the_thing_that_decides():
 # --- the two fixtures, end to end ---
 
 def check_the_detector_separates_the_two_jobs():
+    """Over every quantity now, which is what the floor had to be added for.
+
+    Over the three metrics this started with the skewed log answered 3 and the balanced one
+    answered 0. Over all fourteen the balanced log answered 1 before the floor existed, on a
+    result serialization time of 8 milliseconds against a median of zero.
+    """
     skewed = skew.counts(skew.scan(_app(SKEWED_DIR)))
     balanced = skew.counts(skew.scan(_app(BALANCED_DIR)))
-    assert skewed[skew.SKEWED] == 3, skewed
+    assert skewed[skew.SKEWED] == 8, skewed
     assert balanced[skew.SKEWED] == 0, balanced
 
 
@@ -221,12 +227,13 @@ def check_counts_reports_an_outcome_that_did_not_happen():
     tally = skew.counts(skew.scan(_app(BALANCED_DIR)))
     assert set(tally) == set(skew.OUTCOMES), tally
     assert tally[skew.SKEWED] == 0, tally
-    assert sum(tally.values()) == 9, tally
+    app = _app(BALANCED_DIR)
+    assert sum(tally.values()) == len(app.stages) * len(skew.DEFAULT_METRICS), tally
 
 
 def check_worst_puts_an_unbounded_ratio_above_every_finite_one():
     verdicts = skew.scan(_app(SKEWED_DIR))
-    first = skew.worst(verdicts)
+    first = skew.worst(verdicts, model.BYTES)
     assert first.metric == "memory_spilled", first
     assert first.unbounded, first
     assert max(v.ratio for v in verdicts if v.outcome == skew.SKEWED
@@ -234,15 +241,144 @@ def check_worst_puts_an_unbounded_ratio_above_every_finite_one():
 
 
 def check_worst_is_none_when_nothing_skewed():
-    assert skew.worst(skew.scan(_app(BALANCED_DIR))) is None
+    for kind in model.MEASURED:
+        assert skew.worst(skew.scan(_app(BALANCED_DIR)), kind) is None, kind
 
 
 def check_worst_breaks_a_tie_on_the_stage_id_rather_than_on_argument_order():
     low = skew.judge(_stage([1, 1, 1, 100], stage_id=1), "records_read")
     high = skew.judge(_stage([1, 1, 1, 100], stage_id=5), "records_read")
     assert low.ratio == high.ratio, (low, high)
-    assert skew.worst([low, high]) is low, skew.worst([low, high])
-    assert skew.worst([high, low]) is low, skew.worst([high, low])
+    pair = [low, high]
+    assert skew.worst(pair, model.COUNT) is low, skew.worst(pair, model.COUNT)
+    assert skew.worst(pair[::-1], model.COUNT) is low, skew.worst(pair[::-1], model.COUNT)
+
+
+# --- the metric set, and the floor that widening it made necessary ---
+
+def check_the_default_metric_set_is_the_records_declared_quantities():
+    """Not a list this module keeps. That list was three names and it was wrong."""
+    assert skew.DEFAULT_METRICS == model.QUANTITIES, skew.DEFAULT_METRICS
+    assert len(skew.DEFAULT_METRICS) > 3, skew.DEFAULT_METRICS
+    for metric in skew.DEFAULT_METRICS:
+        assert model.kind_of(metric) in model.MEASURED, metric
+
+
+def check_no_identity_or_instant_field_is_judged():
+    """A ratio over a launch time or an executor id is arithmetic on a label."""
+    for name in ("stage_id", "index", "partition", "executor_id", "launch_time",
+                 "finish_time", "failed"):
+        assert name not in skew.DEFAULT_METRICS, name
+
+
+def check_the_balanced_log_would_be_called_skewed_without_the_floor():
+    """The control for the floor is the control fixture itself.
+
+    Run the balanced log with every floor removed and it reports a skewed stage. That is
+    the case the floor exists for and it is measured rather than constructed.
+    """
+    none_at_all = {kind: None for kind in model.MEASURED}
+    without = skew.scan(_app(BALANCED_DIR), floors=none_at_all)
+    guilty = [v for v in without if v.outcome == skew.SKEWED]
+    assert len(guilty) == 1, guilty
+    assert guilty[0].metric == "serialize_time", guilty[0]
+    assert guilty[0].largest == 8, guilty[0]
+    assert guilty[0].unbounded, guilty[0]
+    assert skew.counts(skew.scan(_app(BALANCED_DIR)))[skew.SKEWED] == 0
+
+
+def _millis_skewed_values(floors):
+    """Every millisecond value that produces a skewed verdict, over both logs."""
+    found = []
+    for directory in (SKEWED_DIR, BALANCED_DIR):
+        for verdict in skew.scan(_app(directory), floors=floors):
+            if verdict.outcome == skew.SKEWED and model.kind_of(verdict.metric) == model.MILLIS:
+                found.append(verdict.largest)
+    return sorted(found)
+
+
+def check_the_millis_floor_sits_in_the_gap_the_two_logs_leave():
+    """What the data gives is a gap. Where in it the floor goes is a judgement.
+
+    An earlier version of this check tried to separate noise from real by asking whether
+    the stage had spilled. That is not a separator. The skewed log's grouping stage spilled
+    and its result serialization time is 3 milliseconds, so the proxy called 3 real.
+
+    So this asserts the honest thing instead. These are the values, this is the widest gap
+    in the low end of them, and the floor is inside it. A fixture that puts a value in the
+    gap fails this rather than quietly moving the answer.
+    """
+    values = _millis_skewed_values({kind: None for kind in model.MEASURED})
+    assert values == [3, 8, 24, 29, 71, 3040, 3048], values
+    below = [v for v in values if v < skew.FLOORS[model.MILLIS]]
+    above = [v for v in values if v >= skew.FLOORS[model.MILLIS]]
+    assert below == [3, 8, 24, 29], below
+    assert max(below) == 29 and min(above) == 71, (below, above)
+
+
+def check_the_skewed_count_is_swept_rather_than_quoted_at_one_floor():
+    """The headline is a fact about the floor until somebody moves the floor.
+
+    Published in the README beside the default so that the number is not read as a
+    property of the job.
+    """
+    sweep = {}
+    for floor in (0, 30, 50, 100, 3041):
+        floors = dict(skew.FLOORS)
+        floors[model.MILLIS] = floor
+        sweep[floor] = skew.counts(skew.scan(_app(SKEWED_DIR), floors=floors))[skew.SKEWED]
+    assert sweep == {0: 11, 30: 8, 50: 8, 100: 7, 3041: 6}, sweep
+    # Every floor from 30 to 71 gives the same answer, which is what the gap means. The
+    # first draft of this check guessed 9 at a floor of 30 and the measurement said 8.
+    assert sweep[30] == sweep[50], sweep
+
+
+def check_a_value_under_the_floor_is_undecided_and_says_which_floor():
+    verdict = skew.judge(_stage([0, 0, 0, 8], field="serialize_time"), "serialize_time")
+    assert verdict.outcome == skew.UNDECIDED, verdict
+    assert "under the millis floor of 50" in verdict.why, verdict
+    assert verdict.ratio is None, verdict
+
+
+def check_exactly_the_floor_gets_an_answer():
+    """Both sides of the limit, because a floor is a comparison like any other."""
+    at = skew.judge(_stage([0, 0, 0, 50], field="gc_time"), "gc_time")
+    under = skew.judge(_stage([0, 0, 0, 49], field="gc_time"), "gc_time")
+    assert at.outcome == skew.SKEWED, at
+    assert under.outcome == skew.UNDECIDED, under
+
+
+def check_a_kind_with_no_floor_is_judged_at_any_size():
+    """Bytes and counts have no measured floor, so nothing silences a small one."""
+    assert skew.FLOORS[model.BYTES] is None
+    assert skew.FLOORS[model.COUNT] is None
+    tiny = skew.judge(_stage([0, 0, 0, 1], field="memory_spilled"), "memory_spilled")
+    assert tiny.outcome == skew.SKEWED, tiny
+
+
+def check_worst_by_kind_answers_once_per_unit_that_skewed():
+    found = skew.worst_by_kind(skew.scan(_app(SKEWED_DIR)))
+    assert set(found) == {model.COUNT, model.BYTES, model.MILLIS}, found
+    assert found[model.BYTES].metric == "memory_spilled", found
+    assert found[model.MILLIS].metric == "gc_time", found
+    for kind, verdict in found.items():
+        assert model.kind_of(verdict.metric) == kind, (kind, verdict)
+    assert skew.worst_by_kind(skew.scan(_app(BALANCED_DIR))) == {}
+
+
+def check_ranking_across_units_is_what_worst_by_kind_refuses_to_do():
+    """Three unbounded verdicts on one stage, and a ratio cannot order them.
+
+    The garbage collection and the spill are both unbounded and both fully concentrated in
+    one task, so neither the ratio nor the share separates a 71 millisecond pause from a
+    620,755,808 byte spill. The unit is the only thing that does.
+    """
+    verdicts = skew.scan(_app(SKEWED_DIR))
+    unbounded = [v for v in verdicts if v.outcome == skew.SKEWED and v.unbounded]
+    assert len(unbounded) == 3, unbounded
+    assert len({v.ratio for v in unbounded}) == 1, unbounded
+    assert len({v.stage_id for v in unbounded}) == 1, unbounded
+    assert len({model.kind_of(v.metric) for v in unbounded}) == 2, unbounded
 
 
 # --- the boundaries, every one of which a mutation pass found unguarded ---

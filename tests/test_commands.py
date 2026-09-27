@@ -213,7 +213,8 @@ def check_skew_exits_one_on_the_skewed_log_and_zero_on_the_balanced_one():
 def check_skew_names_the_worst_stage_or_says_nothing_skewed():
     _code, guilty = _run(["skew", _only_log(SKEWED)])
     _code, clean = _run(["skew", _only_log(BALANCED)])
-    assert guilty.strip().splitlines()[-1].strip().startswith("worst  stage 2"), guilty
+    assert guilty.strip().splitlines()[-1].strip().startswith("worst millis"), guilty
+    assert "worst bytes   stage 2 on memory_spilled" in guilty, guilty
     assert clean.strip().splitlines()[-1].strip() == "nothing skewed at this threshold", clean
 
 
@@ -221,7 +222,9 @@ def check_skew_prints_one_line_per_stage_and_metric_plus_three():
     """The header, the tally and the worst line. A dropped row would otherwise be invisible."""
     app = eventlog.profile(_only_log(SKEWED))
     _code, text = _run(["skew", _only_log(SKEWED)])
-    expected = len(app.stages) * len(skew.DEFAULT_METRICS) + 3
+    kinds = len(skew.worst_by_kind(skew.scan(app)))
+    assert kinds == 3, kinds
+    expected = len(app.stages) * len(skew.DEFAULT_METRICS) + 2 + kinds
     assert len(text.strip().splitlines()) == expected, text
 
 

@@ -170,16 +170,22 @@ def skew_lines(app, verdicts, threshold):
     lines = ["{}  {}  threshold {}  {}".format(
         app.app_id, app.name, threshold, counted(len(verdicts), "verdict"))]
     for verdict in verdicts:
-        lines.append("  {:<9} stage {}  {:<16} {:>10}  {}".format(
+        lines.append("  {:<9} stage {}  {:<17} {:>10}  {}".format(
             verdict.outcome, verdict.stage_id, verdict.metric,
             ratio_text(verdict), verdict.why))
     tally = skew.counts(verdicts)
     lines.append("  {} skewed, {} even, {} undecided".format(
         tally[skew.SKEWED], tally[skew.EVEN], tally[skew.UNDECIDED]))
-    first = skew.worst(verdicts)
-    lines.append("  nothing skewed at this threshold" if first is None else
-                 "  worst  stage {} on {} at {}".format(
-                     first.stage_id, first.metric, ratio_text(first)))
+    # One worst per unit rather than one overall. A ratio has no unit, so the single
+    # answer this printed before was decided by whichever metric the scan reached first.
+    found = skew.worst_by_kind(verdicts)
+    if not found:
+        lines.append("  nothing skewed at this threshold")
+    for kind in model.MEASURED:
+        first = found.get(kind)
+        if first is not None:
+            lines.append("  worst {:<7} stage {} on {} at {}".format(
+                kind, first.stage_id, first.metric, ratio_text(first)))
     return lines
 
 
