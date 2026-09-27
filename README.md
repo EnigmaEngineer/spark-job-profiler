@@ -12,9 +12,10 @@ That needs nothing but the standard library. Capturing a fresh log needs pyspark
 
 ## Where it is
 
-The parser, the stage and task model and the skew detector are built, against two committed
-logs. The spill analysis and the recommendations are not. `sjp stages` still prints
-measurements and no verdict about any of them, because the verdicts live in `sjp skew`.
+The parser, the stage and task model, the skew detector and the spill analysis are built
+against two committed logs. The partition and broadcast recommendations are not. `sjp stages`
+still prints measurements and no verdict about any of them, because the verdicts live in
+`sjp skew` and `sjp spill`.
 
 ## One entry point, and every command says what it does to state
 
@@ -24,6 +25,7 @@ $ python -m sjp commands
   "capture": "write",
   "inventory": "read",
   "skew": "read",
+  "spill": "read",
   "stages": "read"
 }
 ```
@@ -48,6 +50,7 @@ mapping, which is what a guard reads:
   "capture": "write",
   "inventory": "read",
   "skew": "read",
+  "spill": "read",
   "stages": "read"
 }
 reads that changed the store: none
@@ -218,25 +221,36 @@ numbers and the two other traps in that list.
 ## Naming the stage that skewed
 
 ```
-$ python -m sjp skew tests/fixtures/eventlogs/skewed/*
-local-1790267120237  sjp-skewed  threshold 4.0  9 verdicts
-  undecided stage 0  records_read       no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  undecided stage 0  duration           no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  undecided stage 0  memory_spilled     no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  even      stage 1  records_read         1.0000  largest task 1000000 against a median of 1000000
-  even      stage 1  duration             1.7378  largest task 855 against a median of 492
-  undecided stage 1  memory_spilled     no ratio  every task reads zero, so there is no spread
-  skewed    stage 2  records_read        44.2179  largest task 6932663 against a median of 156784
-  skewed    stage 2  duration            14.7246  largest task 3048 against a median of 207
-  skewed    stage 2  memory_spilled    unbounded  more than half the tasks read zero and one reads 620755808
-  3 skewed, 2 even, 4 undecided
-  worst  stage 2 on memory_spilled at unbounded
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/* \
+      --metric records_read --metric duration --metric memory_spilled --metric serialize_time
+local-1790267120237  sjp-skewed  threshold 4.0  12 verdicts
+  undecided stage 0  records_read        no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  duration            no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  memory_spilled      no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  even      stage 1  records_read          1.0000  largest task 1000000 against a median of 1000000
+  even      stage 1  duration              1.7378  largest task 855 against a median of 492
+  undecided stage 1  memory_spilled      no ratio  every task reads zero, so there is no spread
+  undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
+  skewed    stage 2  records_read         44.2179  largest task 6932663 against a median of 156784
+  skewed    stage 2  duration             14.7246  largest task 3048 against a median of 207
+  skewed    stage 2  memory_spilled     unbounded  more than half the tasks read zero and one reads 620755808
+  undecided stage 2  serialize_time      no ratio  largest task 3 is under the millis floor of 50
+  3 skewed, 2 even, 7 undecided
+  worst count   stage 2 on records_read at 44.2179
+  worst bytes   stage 2 on memory_spilled at unbounded
+  worst millis  stage 2 on duration at 14.7246
 ```
+
+Four metrics are named there to keep the block readable. The default is every quantity a
+task carries, which is fourteen of them, and on this log that is 42 verdicts reading
+`8 skewed, 6 even, 28 undecided`. The default used to be three names and
+`### The metric set was three names I chose` below is about what widening it cost.
 
 The same command on the balanced log, which differs from the skewed one in one expression.
 
 ```
-  0 skewed, 4 even, 5 undecided
+  0 skewed, 11 even, 31 undecided
   nothing skewed at this threshold
 ```
 
@@ -246,10 +260,10 @@ It exits 1 when something skewed, so a shell can act on the answer.
 
 A verdict is `skewed` or `even` or `undecided`. The third one is the addition.
 
-Four of the nine verdicts on the skewed log are `undecided` and none is a gap in the tool.
-Three are the two task stage. With two tasks the largest value is one of the two the median
-averages, so the ratio is `2b / (a + b)` and it cannot reach 2 however extreme the pair.
-That was searched rather than assumed.
+Twenty eight of the 42 verdicts on the skewed log are `undecided` and none is a gap in the
+tool. Fourteen are the two task stage. With two tasks the largest value is one of the two the
+median averages, so the ratio is `2b / (a + b)` and it cannot reach 2 however extreme the
+pair. That was searched rather than assumed.
 
 ```
 n=1   values [1]*0 + [1e6] -> spread 1.0000
@@ -257,9 +271,9 @@ n=2   values [1]*1 + [1e6] -> spread 2.0000
 n=3   values [1]*2 + [1e6] -> spread 1000000.0000
 ```
 
-So a stage below three tasks gets no verdict rather than a reassuring one. The fourth
-`undecided` is a spill metric no task moved, which is a different answer from a spill that
-was spread evenly.
+So a stage below three tasks gets no verdict rather than a reassuring one. The rest are a
+metric no task moved, which is a different answer from a metric spread evenly, and a metric
+whose largest value is under the floor described below.
 
 ### The zero median was answering 0.0 and that was the worst available answer
 
@@ -300,22 +314,168 @@ fixture that narrows it fails the suite rather than quietly invalidating the con
 
 `docs/adr-0003-what-a-median-relative-threshold-cannot-say.md` has the rejected options.
 
+### The metric set was three names I chose
+
+`records_read`, `duration`, `memory_spilled`. The three a person reaches for, which is why
+they were the wrong answer. A stage skewed only on disk spill or on remote bytes read got no
+verdict at all, and the command's exit status is computed over whatever was judged, so a real
+skew outside the three read as a clean run.
+
+The set now comes from the task record. Every field on `model.Task` declares what kind of
+thing it is, and a check refuses a field that declares nothing.
+
+```
+count    records_read  records_written
+bytes    peak_memory  memory_spilled  disk_spilled  local_bytes_read  remote_bytes_read  bytes_written
+millis   executor_run_time  deserialize_time  serialize_time  gc_time  duration  outside_run_time
+```
+
+An executor id and a launch time are declared too, as `identity` and `instant`, and neither
+is judged. A ratio over a launch time is arithmetic on a clock reading.
+
+### Widening it broke the control, and that is what the floor is for
+
+The balanced log is the fixture whose job is to have nothing wrong with it. Over fourteen
+metrics it reported a skewed stage.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/balanced/* --metric serialize_time
+local-1790267152313  sjp-balanced  threshold 4.0  3 verdicts
+  undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
+  undecided stage 2  serialize_time      no ratio  largest task 8 is under the millis floor of 50
+  0 skewed, 0 even, 3 undecided
+  nothing skewed at this threshold
+```
+
+That third line was `skewed` with an unbounded ratio before the floor existed. Seven tasks
+serialized their result in zero milliseconds and the eighth took 8. The zero median rule that
+the section above calls the most extreme skew a stage can reach cannot tell 8 milliseconds
+from 620,755,808 bytes, because a ratio carries no unit.
+
+So a verdict now needs the largest value to clear a floor, and the floor is per unit.
+Milliseconds are bounded on both sides by the two logs.
+
+```
+millisecond values that produce a skewed verdict with no floor: [3, 8, 24, 29, 71, 3040, 3048]
+the floor of 50 sits in the gap between 29 and 71
+skewed verdicts on the skewed log by floor: {0: 11, 30: 8, 50: 8, 100: 7, 3041: 6}
+```
+
+Every floor from 30 to 71 gives the same answer, which is what a gap means. Where in that gap
+the number goes is a judgement and not a measurement, so the sweep is published beside it.
+
+Bytes and counts have no floor. Neither log produces a byte or a record verdict small enough
+to be noise, so nothing here measures where that floor belongs, and `None` means no floor
+rather than a number invented to fill the row.
+
+### One worst stage was the metric order in disguise
+
+`worst` used to return a single verdict, ranking an unbounded ratio above every finite one.
+Over three metrics that was nearly harmless. Over fourteen the skewed grouping stage carries
+three unbounded verdicts, on garbage collection, on memory spill and on disk spill. They tie
+on the ratio because all three are infinite, they tie on concentration because one task did
+all of each, and the single answer was decided by which metric the scan reached first. It was
+naming a 71 millisecond pause ahead of a 620,755,808 byte spill.
+
+There is no conversion between a millisecond and a byte, so the report gives one worst per
+unit and stops pretending otherwise.
+
+## What spilled, and what the log will not say about why
+
+```
+$ python -m sjp spill tests/fixtures/eventlogs/skewed/*
+local-1790267120237  sjp-skewed
+no execution memory budget in this log. absent: spark.executor.memory, spark.executor.cores, spark.memory.fraction, spark.memory.storageFraction
+  so spill is reported as measured and not as a share of a limit
+  stage 0  spilling  2 of 2 tasks spilled
+      same bytes    117440288 in memory  61304287 on disk  inflation 1.9157
+      concentration 0.5000 of the spill in one task
+      peak memory   zero on every task, so it says nothing here
+  stage 1  clean  no task spilled
+      peak memory   zero on every task, so it says nothing here
+  stage 2  spilling  1 of 8 tasks spilled all 620755808 bytes of it
+      same bytes    620755808 in memory  88088795 on disk  inflation 7.0469
+      concentration 1.0000 of the spill in one task
+      peak memory   377486768 largest task
+```
+
+It exits 1 when anything spilled. That status means the job spilled and it does not mean the
+job has a problem, because both committed logs exit 1. Which spill is pathological is the
+`memory_spilled` line in `sjp skew`, where the skewed log answers unbounded and the balanced
+log answers even.
+
+### The healthy job spills the same bytes as the broken one
+
+Stage 0 of the balanced log is identical to stage 0 of the skewed log, to the byte, in both
+spill columns. The two jobs differ in one expression and it is not in that stage. So a tool
+reporting that a stage spilled is reporting something both jobs do.
+
+What separates them is how few tasks did it. Stage 0 spreads 117,440,288 bytes over both of
+its tasks and reads a concentration of 0.5. The skewed grouping stage puts all 620,755,808
+bytes in one task of eight and reads 1.0.
+
+### A spill is two measurements of one event
+
+`Memory Bytes Spilled` is the size of the records in memory. `Disk Bytes Spilled` is the size
+of the same records serialized and compressed on the way out. Adding them counts the same
+bytes twice. On the skewed grouping stage the sum reads 708,844,603 against 620,755,808 of
+real data.
+
+The factor between them is not a constant either, so there is nothing to convert one into the
+other with. It is 1.9157 on stage 0 of both logs and 7.0469 on the skewed grouping stage,
+which is 3.68 times apart inside one file. `inflation` is printed to make that visible rather
+than to be acted on.
+
+### Peak execution memory is missing exactly where the pressure was
+
+Stage 0 of both logs spills 117,440,288 bytes and reports a peak execution memory of zero on
+every task. A pressure metric built as peak over a budget reads no pressure at all on the one
+stage in the file that ran out of room.
+
+It does not order two jobs by whether they spill either. The balanced grouping stage peaks at
+167,771,904 bytes on one task and spills nothing. Seven of the skewed grouping stage's eight
+tasks peak at 33,554,384 or below and also spill nothing. The eighth peaks at 377,486,768 and
+spills all of it. The higher peak belongs to the job that stayed inside memory.
+
+So peak is evidence where it is present, and the report says which of those it had on every
+stage rather than printing a zero that reads like a measurement.
+
+### There is no memory budget in either log
+
+`spark.executor.memory`, `spark.executor.cores`, `spark.memory.fraction` and
+`spark.memory.storageFraction` decide how much execution memory a task gets. None of the four
+is in either log. Spark's environment update records what was set and not what was defaulted,
+and both logs were captured in local mode where the driver is the executor.
+
+Both logs do set `spark.driver.memory` to `1g` and that is deliberately not read as the
+budget. It would be right for these two logs and wrong for every log captured on a cluster.
+
+So there is no headroom figure here. A percentage computed against Spark's documented
+defaults would be a measurement of the defaults, and `budget` returns the list of what is
+missing instead.
+
+`docs/adr-0004-what-the-log-cannot-say-about-memory-pressure.md` has the metrics this
+removed.
+
 ## Running the checks
 
 ```
 $ python tests/run_all.py
-148 passed, 0 failed, 148 checks
+194 passed, 0 failed, 194 checks
 ```
 
 Every check is graded by a mutation pass rather than counted.
 
 ```
-sjp/skew.py: 20 mutation sites, running 0 to 20
-20 killed, 0 survived, 0 ungraded, 20 graded
-sjp/model.py: 35 mutation sites, running 0 to 35
-35 killed, 0 survived, 0 ungraded, 35 graded
-sjp/commands.py: 24 mutation sites, running 0 to 24
-24 killed, 0 survived, 0 ungraded, 24 graded
+sjp/memory.py: 22 mutation sites, running 0 to 22
+22 killed, 0 survived, 0 ungraded, 22 graded
+sjp/skew.py: 28 mutation sites, running 0 to 28
+28 killed, 0 survived, 0 ungraded, 28 graded
+sjp/model.py: 40 mutation sites, running 0 to 40
+40 killed, 0 survived, 0 ungraded, 40 graded
+sjp/commands.py: 27 mutation sites, running 0 to 27
+27 killed, 0 survived, 0 ungraded, 27 graded
 sjp/eventlog.py: 9 mutation sites, running 0 to 9
 9 killed, 0 survived, 0 ungraded, 9 graded
 sjp/cli.py: 18 mutation sites, running 0 to 18
@@ -344,6 +504,13 @@ which changes nothing about what gets imported here. It is left alone rather tha
 `tests/runner.py` is not in the table. Mutating the collection loop while using it as the
 oracle grades it against itself, so whatever number came out would not mean anything.
 
+`sjp/memory.py` went into that table at 17 of 22 and five of the survivors were real. A
+budget was never asserted frozen. A stage that spilled to memory and reached no disk was
+never built, so the rule that clean means both columns are zero could become either one. A
+two task stage with one task spilling was never built either, so the wording that names a
+concentrated spill could have slid to three tasks or down to one. And a peak of exactly one
+byte was never tried against the zero test. Five checks closed all five.
+
 ## Known limitations
 
 The row count decides which pathologies land in the log. At 2,000,000 rows the same
@@ -366,9 +533,20 @@ The model keeps every task of every stage. Both committed logs hold eighteen tas
 this costs on a log from a job with a million tasks has not been measured, so nothing here
 claims it is fine.
 
-One threshold covers every metric. A spill ratio and a duration ratio almost certainly do
-not deserve the same constant. Nothing measured here says what the difference should be, so
-per metric thresholds wait for a log that argues for one.
+One ratio threshold covers every metric. The magnitude floor is per unit now and the ratio is
+not, so a spill ratio and a duration ratio are still judged against the same 4.0. Nothing
+measured here says what the difference should be, so per metric thresholds wait for a log that
+argues for one.
+
+The millisecond floor of 50 sits in a gap the two logs leave and its position inside that gap
+is a judgement. The sweep from 0 to 3041 is published above so the headline count reads as a
+fact about the floor. Bytes and counts have no floor at all, because neither log produces a
+case small enough to bound one, so a tiny byte skew is reported rather than suppressed.
+
+The spill analysis reports what spilled and cannot say what it spilled against. Both logs
+were captured in local mode and neither records the four properties that decide a task's
+execution memory. A log from a cluster would carry them and nothing here has been run against
+one.
 
 `undecided` is five of nine verdicts on the healthy job. That is a high proportion for a
 detector and it is a property of these fixtures rather than of the rule. A real job with two

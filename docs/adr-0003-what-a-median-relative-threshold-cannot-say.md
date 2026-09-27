@@ -88,21 +88,46 @@ reached anything published.
 
 ## What the detector does on the two logs
 
+Over every quantity a task carries, which is fourteen metrics and 42 verdicts per log.
+
 ```
-  3 skewed, 2 even, 4 undecided
-  worst  stage 2 on memory_spilled at unbounded
+  8 skewed, 6 even, 28 undecided
+  worst count   stage 2 on records_read at 44.2179
+  worst bytes   stage 2 on memory_spilled at unbounded
+  worst millis  stage 2 on gc_time at unbounded
 ```
 
 against
 
 ```
-  0 skewed, 4 even, 5 undecided
+  0 skewed, 11 even, 31 undecided
   nothing skewed at this threshold
 ```
 
-The two jobs differ in one expression. Five of nine verdicts on the healthy job are
-`undecided`, which is a high proportion and it is honest. Four of them are the two task
-stage and the fifth is a spill metric nothing moved.
+The two jobs differ in one expression and every skewed verdict is on that stage. Thirty one
+of 42 verdicts on the healthy job are `undecided`, which is a high proportion and it is
+honest. Fourteen are the two task stage, and the rest are a metric nothing moved or a value
+under the magnitude floor.
+
+### This section read three metrics until the set was widened
+
+It said `3 skewed, 2 even, 4 undecided` against `0 skewed, 4 even, 5 undecided`, over
+`records_read`, `duration` and `memory_spilled`. Those three were a choice rather than a
+derivation, and the numbers above are larger because the set is now every quantity the task
+record declares.
+
+Widening it did not only add rows. It made the healthy log report a skewed stage, on a result
+serialization time of 8 milliseconds against a median of zero. The zero median rule below
+calls that the worst case a stage can reach, and on 8 milliseconds it is noise. A ratio
+carries no unit, so the rule could not tell the two apart.
+
+The single `worst` line is gone for the same reason. Three of the skewed log's verdicts are
+unbounded, on garbage collection and memory spill and disk spill. They tie on the ratio and
+they tie on concentration, so one answer across every metric was the metric order in
+disguise.
+
+`docs/adr-0004-what-the-log-cannot-say-about-memory-pressure.md` and the magnitude floor in
+`sjp/skew.py` are where both of those went.
 
 ## What was rejected
 
@@ -128,6 +153,10 @@ not multiply.
 carries. The detector reads task fields rather than stage totals, so nothing today depends
 on that map. It stays open.
 
-The threshold is one number for every metric. A spill ratio and a duration ratio probably
-do not deserve the same constant, and nothing measured today says what the difference should
-be. Per metric thresholds wait for a log that argues for them.
+The ratio threshold is one number for every metric. A spill ratio and a duration ratio
+probably do not deserve the same constant, and no measurement here says what the difference
+should be. Per metric thresholds wait for a log that argues for them.
+
+The magnitude floor beside it is per unit and only the millisecond one is bounded on both
+sides. Bytes and counts have no floor, because neither log produces a case small enough to
+say where one belongs.
