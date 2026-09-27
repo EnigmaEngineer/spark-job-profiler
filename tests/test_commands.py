@@ -188,7 +188,7 @@ def check_the_commands_word_refuses_trailing_arguments_and_names_them():
 def check_the_mapping_is_printed_at_the_indent_that_ships():
     _code, text = _run(["commands"])
     expected = ('{\n  "capture": "write",\n  "inventory": "read",'
-                '\n  "skew": "read",\n  "stages": "read"\n}\n')
+                '\n  "skew": "read",\n  "spill": "read",\n  "stages": "read"\n}\n')
     assert text == expected, repr(text)
 
 
@@ -371,3 +371,58 @@ def check_a_stage_line_names_a_total_that_disagrees_with_its_tasks():
     lines = commands.stage_lines(damaged)
     assert any("disagree with the tasks" in line for line in lines), lines
     assert any("memoryBytesSpilled reports" in line for line in lines), lines
+
+
+def _log_without_spill(directory, into):
+    """The balanced log with every task's spill zeroed, written to `into`.
+
+    Derived from a real log rather than hand built, because the format is the thing a hand
+    built fixture would get wrong. Neither committed log has a stage that spills nothing on
+    every stage, so this is the only way to reach the exit zero branch of `sjp spill`.
+    """
+    source = _only_log(directory)
+    with open(source, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+    written = 0
+    with open(into, "w", encoding="utf-8") as handle:
+        for line in lines:
+            event = json.loads(line)
+            if event.get("Event") == "SparkListenerTaskEnd":
+                event["Task Metrics"]["Memory Bytes Spilled"] = 0
+                event["Task Metrics"]["Disk Bytes Spilled"] = 0
+                written += 1
+            handle.write(json.dumps(event) + "\n")
+    assert written == 18, written
+    return into
+
+
+def check_spill_exits_one_on_both_logs_because_both_of_them_spill():
+    """The status is the part a shell reads and both fixtures give it the same answer.
+
+    That is the finding rather than a gap. A spill is not a pathology, so the balanced log
+    exits 1 too and `sjp skew` on memory_spilled is what separates them.
+    """
+    for directory in (SKEWED, BALANCED):
+        code, text = _run(["spill", _only_log(directory)])
+        assert code == 1, (directory, text)
+
+
+def check_spill_exits_zero_when_nothing_spilled():
+    """The other side of the status, on the balanced log with its spill zeroed."""
+    holder = tempfile.mkdtemp()
+    try:
+        path = _log_without_spill(BALANCED, os.path.join(holder, "local-quiet"))
+        code, text = _run(["spill", path])
+        assert code == 0, text
+        assert "clean" in text, text
+        assert "spilling" not in text, text
+    finally:
+        shutil.rmtree(holder)
+
+
+def check_spill_names_the_missing_budget_before_any_stage():
+    code, text = _run(["spill", _only_log(SKEWED)])
+    lines = text.strip().splitlines()
+    assert lines[1].startswith("no execution memory budget"), lines[1]
+    assert "spark.memory.fraction" in lines[1], lines[1]
+    assert lines[3].strip().startswith("stage 0"), lines[3]

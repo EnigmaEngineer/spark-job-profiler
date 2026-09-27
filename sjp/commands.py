@@ -10,7 +10,7 @@ one, so its parser is the only part of it anything can reach.
 import argparse
 import os
 
-from sjp import eventlog, model, skew
+from sjp import eventlog, memory, model, skew
 from sjp.cli import READ, WRITE, command
 
 CAPTURE_DEFAULT_ROWS = 2000000
@@ -201,6 +201,29 @@ def skew_command(rest):
         print(line)
     # Exit 1 when something skewed, so this is usable from a shell that checks a status.
     return 1 if skew.counts(verdicts)[skew.SKEWED] else 0
+
+
+def spill_parser():
+    parser = argparse.ArgumentParser(prog="sjp spill")
+    parser.add_argument("path", help="one event log file")
+    return parser
+
+
+@command("spill", READ, "what spilled, how concentrated it was, and what the log cannot say",
+         probe=lambda store: [_first_log(store)])
+def spill(rest):
+    args = spill_parser().parse_args(rest)
+
+    app = eventlog.profile(args.path)
+    print("{}  {}".format(app.app_id, app.name))
+    for line in memory.pressure_lines(app):
+        print(line)
+    spilled = [report for report in memory.scan(app) if report.spilling]
+    # Exit 1 means this job spilled. It does not mean this job has a problem, and both
+    # committed logs exit 1 because both spill the same 117,440,288 bytes on their first
+    # stage. Which spill is pathological is a question for `sjp skew` on memory_spilled,
+    # where the skewed log answers unbounded and the balanced one answers even.
+    return 1 if spilled else 0
 
 
 @command("capture", WRITE, "run a sample job and keep its event log")
