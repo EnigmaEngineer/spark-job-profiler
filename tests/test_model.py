@@ -404,3 +404,83 @@ def check_a_stage_submitted_but_never_completed_still_builds():
         assert stage.completion_time is None, stage
     finally:
         shutil.rmtree(root)
+
+
+# --- the kinds declared on the task record ---
+
+def check_every_task_field_declares_a_kind():
+    """The check that makes the declaration a single place rather than a habit.
+
+    A field added without a kind fails here, which is the whole reason the kind lives on the
+    field instead of in a tuple somewhere that a detector reads.
+    """
+    for entry in dataclasses.fields(model.Task):
+        assert "kind" in entry.metadata, entry.name
+        assert entry.metadata["kind"] in model.KINDS, (entry.name, entry.metadata)
+
+
+def check_every_kind_is_used_by_something():
+    """A kind nothing declares is a category that was imagined rather than found."""
+    declared = {entry.metadata["kind"] for entry in dataclasses.fields(model.Task)}
+    declared.update(model.DERIVED.values())
+    assert declared == set(model.KINDS), declared
+
+
+def check_every_numeric_property_of_a_task_is_a_declared_derived_quantity():
+    """A property cannot carry field metadata, so this is what keeps DERIVED honest.
+
+    Adding a numeric property and forgetting to declare it fails here rather than leaving a
+    quantity the detector never judges.
+    """
+    task = _app(SKEWED).stages[-1].tasks[0]
+    for name in dir(model.Task):
+        if name.startswith("_") or not isinstance(getattr(model.Task, name), property):
+            continue
+        if isinstance(getattr(task, name), (int, float)):
+            assert name in model.DERIVED, name
+            assert model.DERIVED[name] in model.KINDS, name
+
+
+def check_quantities_holds_every_measured_field_and_nothing_else():
+    measured = [entry.name for entry in dataclasses.fields(model.Task)
+                if entry.metadata["kind"] in model.MEASURED]
+    assert set(model.QUANTITIES) == set(measured) | set(model.DERIVED), model.QUANTITIES
+    assert len(model.QUANTITIES) == len(set(model.QUANTITIES)), model.QUANTITIES
+    for name in ("stage_id", "index", "partition", "executor_id", "launch_time",
+                 "finish_time", "failed"):
+        assert name not in model.QUANTITIES, name
+
+
+def check_the_order_of_quantities_is_the_order_the_record_declares():
+    """So a report's rows do not move when somebody sorts something."""
+    measured = [entry.name for entry in dataclasses.fields(model.Task)
+                if entry.metadata["kind"] in model.MEASURED]
+    assert list(model.QUANTITIES[:len(measured)]) == measured, model.QUANTITIES
+
+
+def check_kind_of_answers_for_a_field_and_for_a_derived_value():
+    assert model.kind_of("memory_spilled") == model.BYTES
+    assert model.kind_of("records_read") == model.COUNT
+    assert model.kind_of("gc_time") == model.MILLIS
+    assert model.kind_of("launch_time") == model.INSTANT
+    assert model.kind_of("executor_id") == model.IDENTITY
+    assert model.kind_of("failed") == model.FLAG
+    assert model.kind_of("duration") == model.MILLIS
+    assert model.kind_of("outside_run_time") == model.MILLIS
+
+
+def check_kind_of_refuses_a_name_the_record_does_not_declare():
+    """Rather than guessing, because a caller asking is about to treat it as a number."""
+    try:
+        model.kind_of("shuffle_read_wait")
+    except model.UnexpectedLog as problem:
+        assert "not a task quantity" in str(problem), problem
+        return
+    raise AssertionError("an undeclared name was given a kind")
+
+
+def check_a_measured_kind_is_not_an_identity_or_an_instant():
+    assert model.IDENTITY not in model.MEASURED
+    assert model.INSTANT not in model.MEASURED
+    assert model.FLAG not in model.MEASURED
+    assert set(model.MEASURED) == {model.COUNT, model.BYTES, model.MILLIS}

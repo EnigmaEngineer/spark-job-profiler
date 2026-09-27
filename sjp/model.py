@@ -22,7 +22,7 @@ per task spread unreachable from the totals, which is the whole reason this mode
 the task events.
 """
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 
 CONSUMES = {}
 HANDLERS = {}
@@ -56,28 +56,56 @@ class Total:
     value: object
 
 
+# What a task field is, decided once on the field and never again anywhere else.
+#
+# A detector that ranks stages by a ratio needs to know which fields a ratio means
+# something for. Before this, the answer was a tuple of three names in `sjp.skew` that I
+# picked, so a stage skewed on disk spill got no verdict at all. The kind is declared on
+# the field because a new field then cannot be added without answering the question, and
+# `tests/test_model.py` refuses a field carrying no kind.
+COUNT = "count"
+BYTES = "bytes"
+MILLIS = "millis"
+# Names a thing rather than measuring an amount of it. A ratio over an executor id or a
+# partition number is arithmetic on a label.
+IDENTITY = "identity"
+# A point on the clock. Differences between instants are quantities and the instants are
+# not, so `launch_time` is here and `duration` is a declared derived quantity.
+INSTANT = "instant"
+# Whether something happened. Two states, so a median relative ratio has nothing to say.
+FLAG = "flag"
+
+MEASURED = (COUNT, BYTES, MILLIS)
+KINDS = MEASURED + (IDENTITY, INSTANT, FLAG)
+
+
+def measured(kind):
+    """A field whose values a median relative ratio can be computed over."""
+    return field(metadata={"kind": kind})
+
+
 @dataclass(frozen=True)
 class Task:
-    stage_id: int
-    stage_attempt: int
-    index: int
-    partition: int
-    executor_id: str
-    launch_time: int
-    finish_time: int
-    executor_run_time: int
-    deserialize_time: int
-    serialize_time: int
-    gc_time: int
-    peak_memory: int
-    memory_spilled: int
-    disk_spilled: int
-    records_read: int
-    local_bytes_read: int
-    remote_bytes_read: int
-    records_written: int
-    bytes_written: int
-    failed: bool
+    stage_id: int = measured(IDENTITY)
+    stage_attempt: int = measured(IDENTITY)
+    index: int = measured(IDENTITY)
+    partition: int = measured(IDENTITY)
+    executor_id: str = measured(IDENTITY)
+    launch_time: int = measured(INSTANT)
+    finish_time: int = measured(INSTANT)
+    executor_run_time: int = measured(MILLIS)
+    deserialize_time: int = measured(MILLIS)
+    serialize_time: int = measured(MILLIS)
+    gc_time: int = measured(MILLIS)
+    peak_memory: int = measured(BYTES)
+    memory_spilled: int = measured(BYTES)
+    disk_spilled: int = measured(BYTES)
+    records_read: int = measured(COUNT)
+    local_bytes_read: int = measured(BYTES)
+    remote_bytes_read: int = measured(BYTES)
+    records_written: int = measured(COUNT)
+    bytes_written: int = measured(BYTES)
+    failed: bool = measured(FLAG)
 
     @property
     def duration(self):
@@ -93,6 +121,44 @@ class Task:
         any of its work starts.
         """
         return self.duration - self.executor_run_time
+
+
+# A quantity a task carries that is not a field on it. Kept as its own map because a
+# property cannot hold dataclass metadata. `tests/test_model.py` walks Task for any
+# property returning a number and refuses one that is absent here, so this is checked
+# rather than remembered.
+DERIVED = {
+    "duration": MILLIS,
+    "outside_run_time": MILLIS,
+}
+
+
+def kind_of(name):
+    """The kind declared for one task quantity, field or derived.
+
+    Raises rather than guessing, because a caller asking for the kind of something the
+    record does not declare is a caller about to treat it as a number by default.
+    """
+    for entry in fields(Task):
+        if entry.name == name:
+            return entry.metadata["kind"]
+    if name in DERIVED:
+        return DERIVED[name]
+    raise UnexpectedLog("{} is not a task quantity".format(name))
+
+
+def quantities():
+    """Every task field and derived value a ratio means something for, in declared order.
+
+    Fields first in the order the log fills them, then the derived ones. `sjp.skew` reads
+    this instead of holding a list, which is the whole point of the kinds above.
+    """
+    declared = [entry.name for entry in fields(Task)
+                if entry.metadata["kind"] in MEASURED]
+    return tuple(declared + sorted(DERIVED))
+
+
+QUANTITIES = quantities()
 
 
 @dataclass(frozen=True)
