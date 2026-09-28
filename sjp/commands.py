@@ -10,7 +10,7 @@ one, so its parser is the only part of it anything can reach.
 import argparse
 import os
 
-from sjp import eventlog, memory, model, skew
+from sjp import eventlog, layout, memory, model, skew
 from sjp.cli import READ, WRITE, command
 
 CAPTURE_DEFAULT_ROWS = 2000000
@@ -37,7 +37,11 @@ def inventory_parser():
 
 def capture_parser():
     parser = argparse.ArgumentParser(prog="sjp capture")
-    parser.add_argument("--job", required=True, choices=("skewed", "balanced"))
+    # Imported here rather than at module level. The tuple costs no pyspark, and taking
+    # it from the module that runs the jobs is what stops the two lists drifting.
+    from jobs.sample import JOBS
+
+    parser.add_argument("--job", required=True, choices=JOBS)
     parser.add_argument("--out", required=True, help="directory to write the log into")
     parser.add_argument("--rows", type=int, default=CAPTURE_DEFAULT_ROWS)
     return parser
@@ -224,6 +228,31 @@ def spill(rest):
     # stage. Which spill is pathological is a question for `sjp skew` on memory_spilled,
     # where the skewed log answers unbounded and the balanced one answers even.
     return 1 if spilled else 0
+
+
+def layout_parser():
+    parser = argparse.ArgumentParser(prog="sjp layout")
+    parser.add_argument("path", help="one event log file")
+    parser.add_argument("--advisory", type=int, default=layout.ADVISORY_BYTES,
+                        help="bytes a partition should hold, measured and compressed")
+    parser.add_argument("--broadcast", type=int, default=layout.BROADCAST_BYTES,
+                        help="estimated bytes under which a join side could be broadcast")
+    return parser
+
+
+@command("layout", READ, "partition counts and broadcast candidates, from the plan",
+         probe=lambda store: [_first_log(store)])
+def layout_command(rest):
+    args = layout_parser().parse_args(rest)
+
+    app = eventlog.profile(args.path)
+    for line in layout.layout_lines(app, args.advisory, args.broadcast):
+        print(line)
+    # Exit 1 means something here is worth changing. A broadcast candidate or a partition
+    # count the config can move and the volume disagrees with. A log whose counts are all
+    # written into the query exits 0, because there is nothing this tool can advise on.
+    # The counting is in sjp.layout so that a mutation pass can reach it.
+    return 1 if layout.actionable(app, args.advisory, args.broadcast) else 0
 
 
 @command("capture", WRITE, "run a sample job and keep its event log")

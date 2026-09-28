@@ -16,6 +16,7 @@ from sjp import cli, commands, eventlog, model, skew
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
 BALANCED = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
+JOIN = os.path.join(HERE, "fixtures", "eventlogs", "join")
 
 
 @contextlib.contextmanager
@@ -188,7 +189,8 @@ def check_the_commands_word_refuses_trailing_arguments_and_names_them():
 def check_the_mapping_is_printed_at_the_indent_that_ships():
     _code, text = _run(["commands"])
     expected = ('{\n  "capture": "write",\n  "inventory": "read",'
-                '\n  "skew": "read",\n  "spill": "read",\n  "stages": "read"\n}\n')
+                '\n  "layout": "read",\n  "skew": "read",\n  "spill": "read",'
+                '\n  "stages": "read"\n}\n')
     assert text == expected, repr(text)
 
 
@@ -288,7 +290,17 @@ def check_capture_hands_the_parsed_arguments_straight_to_the_job():
         seen.update(job=job, out_dir=out_dir, rows=rows)
         return "/somewhere/local-1"
 
+    # Built from the real module with one function replaced, rather than from the two
+    # attributes this check happens to use. A hand built double covers what its author
+    # remembered, and this one stopped covering the module the day the module grew an
+    # argument the command reads. Importing it costs no pyspark, because every pyspark
+    # import in it is inside a function.
+    from jobs import sample as real
+
     stub = types.ModuleType("jobs.sample")
+    for attribute in dir(real):
+        if not attribute.startswith("__"):
+            setattr(stub, attribute, getattr(real, attribute))
     stub.run = run
     parent = types.ModuleType("jobs")
     parent.sample = stub
@@ -426,3 +438,29 @@ def check_spill_names_the_missing_budget_before_any_stage():
     assert lines[1].startswith("no execution memory budget"), lines[1]
     assert "spark.memory.fraction" in lines[1], lines[1]
     assert lines[3].strip().startswith("stage 0"), lines[3]
+
+
+def check_layout_exits_zero_when_nothing_in_the_log_is_the_config_to_change():
+    for directory in (SKEWED, BALANCED):
+        code, text = _run(["layout", _only_log(directory)])
+        assert code == 0, (directory, code)
+        assert "0 worth changing" in text, text
+
+
+def check_layout_exits_one_when_something_is_worth_changing():
+    code, text = _run(["layout", _only_log(JOIN)])
+    assert code == 1, code
+    assert "3 worth changing" in text, text
+
+
+def check_layout_passes_the_advisory_size_through_to_the_count():
+    """A flag nothing reads looks exactly like a flag that works."""
+    code, text = _run(["layout", "--advisory", "21000000", _only_log(JOIN)])
+    assert code == 1, code
+    assert "2 worth changing" in text, text
+
+
+def check_layout_passes_the_broadcast_threshold_through_to_the_count():
+    code, text = _run(["layout", "--broadcast", "1", _only_log(JOIN)])
+    assert code == 1, code
+    assert "2 worth changing" in text, text
