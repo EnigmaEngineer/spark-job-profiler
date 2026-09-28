@@ -259,9 +259,25 @@ class Application:
     end_time: int
     properties: dict
     cores: int
+    cpus_per_task: float
     jobs: tuple
     stages: tuple
+    plans: tuple
+    accumulators: dict
     events_used: frozenset
+
+    @property
+    def slots(self):
+        """How many tasks can run at once.
+
+        Cores alone is the wrong answer whenever a task asks for more than one cpu, and
+        the amount it asks for is recorded in its own event rather than in the executor
+        one. Nothing in this repo runs with a task cpus above 1, so this returns the same
+        number as cores here, and a log where it does not is the case it exists for.
+        """
+        if not self.cpus_per_task:
+            return self.cores
+        return int(self.cores // self.cpus_per_task)
 
     @property
     def wall_time(self):
@@ -272,6 +288,16 @@ class Application:
             if stage.stage_id == stage_id:
                 return stage
         raise UnexpectedLog("no stage {} in {}".format(stage_id, self.app_id))
+
+    def accumulator(self, acc_id):
+        """One accumulator's value by id, or None when the log never reported it.
+
+        The id is the only address a plan node hands out for its metrics, and the value
+        may be on a stage or it may be on the driver. Three of the metrics this repo reads
+        are driver side and never appear on a stage at all, so a lookup that searched only
+        the stages would answer None for a number that is in the file.
+        """
+        return self.accumulators.get(acc_id)
 
 
 # Accumulable name to the task field holding the same quantity. Every one of these was
@@ -314,6 +340,9 @@ class _Build:
         self.submitted = {}
         self.completed = {}
         self.tasks = {}
+        self.cpus_per_task = 0.0
+        self.plans = []
+        self.driver_accums = {}
 
 
 @handles("SparkListenerApplicationStart", "the application id, its name and when it began")
@@ -338,6 +367,33 @@ def _environment(state, event):
 @handles("SparkListenerExecutorAdded", "the cores an executor brought to the run")
 def _executor_added(state, event):
     state.cores += event.get("Executor Info", {}).get("Total Cores", 0)
+
+
+@handles("SparkListenerResourceProfileAdded", "how many cpus one task asks for")
+def _resource_profile(state, event):
+    # Cores are on the executor event and the cpus a task wants are here. Both are needed
+    # before the word slot means anything, and a profiler that reads only the first one
+    # answers the right number for the common case and the wrong one for the case that
+    # matters.
+    requests = event.get("Task Resource Requests", {})
+    state.cpus_per_task = requests.get("cpus", {}).get("Amount", 0.0)
+
+
+@handles("org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart",
+         "the physical plan, which is the only place a join or an exchange is named")
+def _sql_execution_start(state, event):
+    info = event.get("sparkPlanInfo")
+    if info is not None:
+        state.plans.append(info)
+
+
+@handles("org.apache.spark.sql.execution.ui.SparkListenerDriverAccumUpdates",
+         "metric values the driver reported, which never reach a stage")
+def _driver_accum_updates(state, event):
+    for pair in event.get("accumUpdates", []):
+        # Written as a two element list rather than an object. The partition count of
+        # every exchange in this repo arrives only here.
+        state.driver_accums[pair[0]] = pair[1]
 
 
 @handles("SparkListenerJobStart", "which stages belong to which job")
@@ -458,6 +514,13 @@ def build(events):
         raise UnexpectedLog("{} ran no stages".format(state.app.get("app_id")))
 
     jobs = tuple(Job(**job) for job in state.jobs)
+    # The driver values go in first so a stage reporting the same id wins. A stage
+    # accumulable is the value at the end of the stage and a driver update is written
+    # once, and where both exist the stage one is the later reading.
+    accumulators = dict(state.driver_accums)
+    for stage in stages:
+        for total in stage.totals:
+            accumulators[total.acc_id] = total.value
     return Application(
         app_id=state.app.get("app_id"),
         name=state.app.get("name"),
@@ -466,7 +529,10 @@ def build(events):
         end_time=state.app.get("end_time"),
         properties=state.properties,
         cores=state.cores,
+        cpus_per_task=state.cpus_per_task,
         jobs=jobs,
         stages=stages,
+        plans=tuple(state.plans),
+        accumulators=accumulators,
         events_used=frozenset(seen),
     )
