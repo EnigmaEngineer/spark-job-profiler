@@ -73,17 +73,26 @@ sjp/cli.py          the entry point, the effect registry and the mapping
 sjp/contract.py     snapshot a directory, run the reads, diff it
 sjp/eventlog.py     get a log off disk, count events, say what is missing
 sjp/model.py        the stage and task model, and the events it declares it reads
+sjp/plan.py         the physical plan, where a join and an exchange are named
+sjp/layout.py       partition counts and broadcast candidates
 sjp/commands.py     the commands that exist
-jobs/sample.py      two jobs that differ in one expression
+jobs/sample.py      three jobs, each carrying one known pathology
 scripts/            drivers and controls, no judgements
-tests/fixtures/     two real event logs, unedited
+tests/fixtures/     three real event logs, unedited
 ```
 
 ## The sample jobs
 
-Two jobs over 8,000,000 rows. Same shuffle partition count and same payload in both.
-Adaptive execution off. One puts 85 percent of the rows on a single key. The other
-spreads them over 199. That is the only difference.
+Three jobs over 8,000,000 rows. Same shuffle partition count and same payload in all of
+them. Adaptive execution off.
+
+The first two differ in one expression. One puts 85 percent of the rows on a single key.
+The other spreads them over 199.
+
+The third joins the spread one to a 199 row relation with broadcasting switched off, so
+Spark plans a sort merge join and shuffles both sides. It exists because neither of the
+other two contains a join of any kind, and a tool that recommends a broadcast needs a log
+where a join it could have replaced actually happened.
 
 The point is not that they are realistic. It is that the pathology is known before the
 profiler is pointed at the log, so the profiler can be graded instead of believed.
@@ -458,39 +467,155 @@ missing instead.
 `docs/adr-0004-what-the-log-cannot-say-about-memory-pressure.md` has the metrics this
 removed.
 
+## Partition counts and broadcast candidates
+
+`sjp layout` reads the physical plan, which is the only record of what Spark decided to do.
+A stage boundary looks the same whether it feeds an aggregate or a join, so nothing in the
+stage model can tell a shuffle a broadcast would remove from one that nothing would.
+
+```
+$ python -m sjp layout tests/fixtures/eventlogs/join/local-*
+local-1790609373067  sjp-join  2 cores  1.0 cpus a task  2 slots
+  hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
+      bytes         163272682 measured  832000000 estimated
+      plan text     agrees at 8
+      per partition 20409085 measured bytes each
+      schedule      4 rounds of 2 slots, 2 in the last
+      partitions    4 rather than 8. 163272682 bytes at an advisory 67108864 wants 3, and the 2 slots round it to 4
+      schedule after 2 rounds rather than 4 rounds
+  RoundRobinPartitioning into 8 partitions  chosen by REPARTITION_BY_NUM
+      bytes         42048255 measured  128000000 estimated
+      plan text     agrees at 8
+      per partition 5256032 measured bytes each
+      schedule      4 rounds of 2 slots, 2 in the last
+      partitions    none. REPARTITION_BY_NUM is an argument in the query, so the config does not decide it
+  hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
+      bytes         2401 measured  4776 estimated
+      plan text     agrees at 8
+      per partition 300 measured bytes each
+      schedule      4 rounds of 2 slots, 2 in the last
+      partitions    2 rather than 8. 2401 bytes at an advisory 67108864 wants 1, and the 2 slots round it to 2
+      schedule after 1 round rather than 4 rounds
+  large side of SortMergeJoin  leave it shuffled
+      why           832000000 estimated, which is over the 10485760 threshold
+  small side of SortMergeJoin  broadcast it
+      why           4776 estimated against a 10485760 threshold, and the other side shuffled 163272682
+  3 worth changing
+```
+
+### There are two sizes and they answer different questions
+
+Every exchange reports a `data size` and a `shuffle bytes written`. Both are bytes, both
+are about the same operator, and using the wrong one is not a rounding error.
+
+`data size` is an estimate. It is the row count multiplied by a width taken from the
+schema, and it divides to a whole number of bytes every time.
+
+```
+832000000 / 8000000 = 104 bytes a row
+128000000 / 8000000 = 16 bytes a row
+     4776 /     199 = 24 bytes a row
+```
+
+`shuffle bytes written` is measured, serialized and compressed, and it does not divide
+evenly. 130788590 over the same 8000000 rows is 16.34857375.
+
+The two jobs that differ in one expression are what settled this. The estimate reads
+832000000 on the key exchange of both of them. The measurement reads 130788590 on the
+skewed job and 163272682 on the balanced one.
+
+The estimate cannot see the data. A recommender reading it hands the sick job the advice
+for the healthy one. There is no conversion available either. The factor between the two
+runs 1.9892, 3.0441, 5.0958 and 6.3614 across the four exchanges here.
+
+Partition sizing therefore reads the measured number, which is what adaptive execution
+compares its advisory size against. A broadcast decision reads the estimate, which is what
+Spark's own planner compares against the broadcast threshold.
+
+### The measured number is smaller on the job with the problem
+
+This is the reading that makes a volume only recommendation wrong rather than imprecise.
+
+```
+skewed    hashpartitioning  130788590 bytes written
+balanced  hashpartitioning  163272682 bytes written
+```
+
+The hot key compresses. Eighty five percent of the rows carry the same value, so the job
+with the pathology writes 32484092 fewer bytes than the healthy one. Sized on volume alone
+the sick job gets fewer partitions than the job that is fine, which is the opposite of the
+advice anybody wants.
+
+### Most partition counts are not the config's to change
+
+An exchange records who chose its count. `ENSURE_REQUIREMENTS` means Spark took it from
+`spark.sql.shuffle.partitions`. `REPARTITION_BY_NUM` means it is an argument in the query.
+
+Both aggregate logs are the second kind throughout, so `sjp layout` prints no target for
+either of them and names the origin instead. The recommendation this command exists for
+correctly has nothing to say on two of the three logs in this repo.
+
+### Slots are cores only while a task asks for one cpu
+
+The cores an executor brought are on one event and the cpus a task asks for are on another.
+Both committed jobs run two cores at one cpu a task, so slots and cores are the same number
+here and a profiler reading cores alone would look correct on every log in this repo.
+
+### What the log will not say
+
+A partition count cannot split a single key. Hash partitioning sends one key to one
+partition however many partitions there are, so a target computed from volume is not advice
+for a stage skewed on its key, and the log carries no key distribution to tell the two
+cases apart.
+
+Every derived table in this README and in the decision records is printed by
+`scripts/figures.py`, so a figure here and the log it came from cannot drift apart without
+the comparison failing.
+
+`docs/adr-0005-two-sizes-and-which-question-each-one-answers.md` has the rest, including
+what happened to the stage ids between two captures of the same job.
+
 ## Running the checks
 
 ```
 $ python tests/run_all.py
-194 passed, 0 failed, 194 checks
+276 passed, 0 failed, 276 checks
 ```
 
 Every check is graded by a mutation pass rather than counted.
 
 ```
-sjp/memory.py: 22 mutation sites, running 0 to 22
-22 killed, 0 survived, 0 ungraded, 22 graded
+sjp/layout.py: 64 mutation sites, running 0 to 64
+64 killed, 0 survived, 0 ungraded, 64 graded
+sjp/model.py: 44 mutation sites, running 0 to 44
+44 killed, 0 survived, 0 ungraded, 44 graded
+sjp/plan.py: 30 mutation sites, running 0 to 30
+30 killed, 0 survived, 0 ungraded, 30 graded
+sjp/commands.py: 29 mutation sites, running 0 to 29
+29 killed, 0 survived, 0 ungraded, 29 graded
 sjp/skew.py: 28 mutation sites, running 0 to 28
 28 killed, 0 survived, 0 ungraded, 28 graded
-sjp/model.py: 40 mutation sites, running 0 to 40
-40 killed, 0 survived, 0 ungraded, 40 graded
-sjp/commands.py: 27 mutation sites, running 0 to 27
-27 killed, 0 survived, 0 ungraded, 27 graded
-sjp/eventlog.py: 9 mutation sites, running 0 to 9
-9 killed, 0 survived, 0 ungraded, 9 graded
+sjp/memory.py: 22 mutation sites, running 0 to 22
+22 killed, 0 survived, 0 ungraded, 22 graded
 sjp/cli.py: 18 mutation sites, running 0 to 18
 18 killed, 0 survived, 0 ungraded, 18 graded
+sjp/eventlog.py: 9 mutation sites, running 0 to 9
+9 killed, 0 survived, 0 ungraded, 9 graded
 sjp/contract.py: 6 mutation sites, running 0 to 6
 6 killed, 0 survived, 0 ungraded, 6 graded
 scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
 19 killed, 1 survived, 0 ungraded, 20 graded
-jobs/sample.py: 17 mutation sites, running 0 to 17
-2 killed, 15 survived, 0 ungraded, 17 graded
+jobs/sample.py: 20 mutation sites, running 0 to 20
+2 killed, 18 survived, 0 ungraded, 20 graded
 ```
 
 The last row is the honest one. Every surviving mutant in `jobs/sample.py` sits in code
 that only runs with a Spark session, and a check cannot have one. What grades that module
-is the pair of logs it produced, which is weaker than a mutant and is not nothing.
+is the three logs it produced, which is weaker than a mutant and is not nothing.
+
+That row also got worse by three sites and killed none of them. The join job is more code
+in the same unreachable place, so the denominator moved and the numerator did not. Saying
+so is the point. A score that only ever gets quoted when it improves is not a measurement.
 
 That row got worse on purpose. Two of its mutants used to die against checks that read the
 module's own constants back out of the module, which is transcription and would have gone
@@ -503,6 +628,15 @@ which changes nothing about what gets imported here. It is left alone rather tha
 
 `tests/runner.py` is not in the table. Mutating the collection loop while using it as the
 oracle grades it against itself, so whatever number came out would not mean anything.
+
+`sjp/layout.py` went into that table at 30 of 47 and `sjp/plan.py` at 25 of 30, and every
+one of the twenty two survivors was real. Six were Spark's two documented defaults, which
+nothing pinned because every check spelled them as their own names. Four were records
+nothing asserted frozen. Nine were the whole of the command's exit arithmetic, which lived
+inside the command and therefore sat where a mutation pass pointed at the library could
+never reach it. That rule is older than this module and it was broken again anyway. The
+counting moved into `layout.actionable`, the count is printed rather than left as a status,
+and the three remaining boundaries got a fixture sitting exactly on them.
 
 `sjp/memory.py` went into that table at 17 of 22 and five of the survivors were real. A
 budget was never asserted frozen. A stage that spilled to memory and reached no disk was
@@ -532,6 +666,19 @@ argues that they are uninteresting.
 The model keeps every task of every stage. Both committed logs hold eighteen tasks. What
 this costs on a log from a job with a million tasks has not been measured, so nothing here
 claims it is fine.
+
+A stage id is a property of one run when the plan is not a straight line. The join job was
+captured twice and every stage moved, because the two sides are submitted together and
+whichever is scheduled first takes the lower id. Nothing in `sjp/layout.py` or `sjp/plan.py`
+addresses a stage by id. The earlier documents here do, and they are safe only because both
+aggregate plans are linear.
+
+The partition target is arithmetic over one shuffle and the slot count. It does not know
+what the stage after the exchange will do with a partition, and a count that sizes the bytes
+well can still be the count that makes something spill.
+
+The broadcast verdict is about the plan Spark produced and not about the query. A join that
+could be rewritten to avoid the shuffle entirely is outside what a log can see.
 
 One ratio threshold covers every metric. The magnitude floor is per unit now and the ratio is
 not, so a spill ratio and a duration ratio are still judged against the same 4.0. Nothing
