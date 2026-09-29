@@ -145,8 +145,13 @@ def size(shuffle, slots, advisory=ADVISORY_BYTES):
                           "decide it".format(shuffle.origin))
 
     target = max(from_volume, slots)
-    # Rounded up to a whole number of rounds. A count that leaves a part filled last wave
-    # pays a whole task's wall time for whatever fraction of the slots it uses.
+    # Rounded up to a whole number of rounds. The argument for this used to be that a
+    # part filled last round pays a whole task's wall time for a fraction of the slots.
+    # That was never measured and it did not survive being measured. Running one job at 3
+    # and at 4 on two slots, both counts take two rounds, so the rounding removed no round
+    # at all and the stage wall did not move. What it did move is the largest task, down
+    # 15 percent and separated, because the extra partition splits the keys one more way.
+    # So the count is kept and the reason is the split rather than the schedule.
     target = int(math.ceil(target / slots) * slots)
     if target == current:
         why = "{} bytes over {} partitions is already inside the advisory size".format(

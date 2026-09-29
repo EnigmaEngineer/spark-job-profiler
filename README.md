@@ -83,8 +83,7 @@ tests/fixtures/     three real event logs, unedited
 
 ## The sample jobs
 
-Three jobs over 8,000,000 rows. Same shuffle partition count and same payload in all of
-them. Adaptive execution off.
+Four jobs over 8,000,000 rows. Same payload in all of them. Adaptive execution off.
 
 The first two differ in one expression. One puts 85 percent of the rows on a single key.
 The other spreads them over 199.
@@ -93,6 +92,12 @@ The third joins the spread one to a 199 row relation with broadcasting switched 
 Spark plans a sort merge join and shuffles both sides. It exists because neither of the
 other two contains a join of any kind, and a tool that recommends a broadcast needs a log
 where a join it could have replaced actually happened.
+
+The fourth sends the skewed distribution through that same join. The first three name
+their own partition count, and a count written into the query is not a count a config
+change can move, so the profiler correctly refuses to advise on any of them. This one lets
+the join demand the partitioning and Spark takes the count from the session. It is the log
+the recommendation can actually be applied to. See what happened when it was.
 
 The point is not that they are realistic. It is that the pathology is known before the
 profiler is pointed at the log, so the profiler can be graded instead of believed.
@@ -575,11 +580,144 @@ the comparison failing.
 `docs/adr-0005-two-sizes-and-which-question-each-one-answers.md` has the rest, including
 what happened to the stage ids between two captures of the same job.
 
+## Applying the recommendation, and what it did
+
+The three jobs above all write their own partition count into the query, so `sjp layout`
+correctly refuses to advise on any of them. A recommendation nothing can act on cannot be
+benchmarked. The fourth job exists to close that gap. It sends the skewed distribution
+through a sort merge join, so the join is what demands the partitioning and Spark takes
+the count from `spark.sql.shuffle.partitions`. On that log the command has something to
+say, and the advice can be applied and timed.
+
+Putting the hot key through a join rather than a grouped aggregate is not decoration.
+Spark puts a partial aggregate in front of the shuffle whenever the query allows it, and a
+partial aggregate over two hundred keys empties the shuffle of the rows the skew is made
+of. The join carries every row across the boundary.
+
+On its log `sjp layout` reads the key exchange at 88,788,038 measured bytes and recommends
+2 partitions rather than the 8 the session used.
+
+```
+python scripts/benchmark.py --job skewed_join --rows 8000000 \
+    --arm current=8 --arm advised=2 --arm volume=3 --arm rounded=4 \
+    --passes 4 --out <dir>
+python scripts/benchmark.py --report <dir>/manifest.json
+```
+
+Four passes an arm. Each run is its own process, so no arm inherits a warm session from
+another. The arm order rotates, so each one runs first exactly once. The first pass is
+discarded. Four against four puts the smallest reachable p at 0.0286, which is the reason
+the schedule is four and not three. Three against three cannot return anything under 0.05
+however the numbers land, and `sjp.bench` refuses to report a p for a comparison that
+size rather than printing one beside a note that it could never have mattered.
+
+The stage below is the one that reads every row. It is addressed by its row count and not
+by its number, because a join submits both sides at once and whichever the scheduler takes
+first gets the lower stage id.
+
+```
+the stage that reads every row, which is the one the job is about
+  current   8 tasks  wall 11087 10209 11138 10114  largest task 8295 7068 7310 7418  median task 933 799 1018 868
+  advised   2 tasks  wall 10456 10484 10307 10943  largest task 10420 10455 10274 10916  median task 6727 6512 6596 6804
+  volume    3 tasks  wall 10911 10236 10383 11050  largest task 10856 10167 10357 11016  median task 2605 2121 2613 2498
+  rounded   4 tasks  wall 10689 11114 11301 11259  largest task 8906 8561 9197 9244  median task 1720 2538 1961 1855
+  wall advised against current  0.9916  undecided  p 0.8571 against a floor of 0.0286, so undecided rather than equal
+  wall volume against current  1.0008  undecided  p 0.9714 against a floor of 0.0286, so undecided rather than equal
+  wall rounded against current  1.0427  undecided  p 0.2000 against a floor of 0.0286, so undecided rather than equal
+  largest task advised against current  1.3979  separated  p 0.0286 against a floor of 0.0286
+  largest task volume against current  1.4089  separated  p 0.0286 against a floor of 0.0286
+  largest task rounded against current  1.1933  separated  p 0.0286 against a floor of 0.0286
+```
+
+### Taking the advice made the job no faster and its worst task 40 percent slower
+
+The stage did not move. 10,637 ms against 10,548 ms is a ratio of 0.9916 and a p of
+0.8571, and the whole application wall sits between 32,401 ms and 32,750 ms across all
+four arms. Nothing separated.
+
+The largest task did move and it moved the wrong way. 7,523 ms became 10,516 ms. That one
+is separated at the floor, meaning every reading of one arm sits above every reading of
+the other, which is the strongest result four passes an arm can return.
+
+The reason is the thing this README already said before any of it was run. Hash
+partitioning sends one key to one partition however many partitions there are. Eighty five
+percent of the rows are on a single key, so that key's partition is the critical path at
+any count. Cutting from 8 to 2 does not move the hot key. It moves the other fifteen
+percent onto fewer partitions, so the hot task ends up carrying more and finishes later.
+
+The advisory size the recommendation is built on is a total divided by a target. A total
+cannot see a distribution. That was an argument on the previous read of this file and it
+is a measurement now.
+
+### The skew detector goes blind at the count the layout command recommends
+
+Worth reading beside the table above. The spread on the carrying stage runs 7.18 to 8.89
+at 8 partitions and 1.55 to 1.61 at 2. A detector ranking stages by a median relative
+ratio stops naming this stage at all on the advised count, and on all four of those passes
+it names a stage that reads no rows.
+
+```
+the stage a spread ranking would name, which is not always that one
+  current   stage 3  8 tasks  spread 8.89
+  current   stage 3  8 tasks  spread 8.85
+  current   stage 3  8 tasks  spread 7.18
+  current   stage 3  8 tasks  spread 8.54
+  advised   stage 2  2 tasks  spread 1.67  not the carrying stage
+  advised   stage 2  8 tasks  spread 2.45  not the carrying stage
+  advised   stage 1  8 tasks  spread 1.92  not the carrying stage
+  advised   stage 1  8 tasks  spread 1.95  not the carrying stage
+  volume    stage 3  3 tasks  spread 4.17
+  volume    stage 3  3 tasks  spread 4.79
+  volume    stage 3  3 tasks  spread 3.96
+  volume    stage 3  3 tasks  spread 4.41
+  rounded   stage 3  4 tasks  spread 5.18
+  rounded   stage 3  4 tasks  spread 3.37
+  rounded   stage 3  4 tasks  spread 4.69
+  rounded   stage 3  4 tasks  spread 4.98
+```
+
+The skew did not go away. The largest task got slower. What went away is the contrast,
+because with two partitions the hot partition and the median partition are the same
+partition. A median relative ratio is a statement about the partition count as much as
+about the data, and it is least informative exactly where the partitions are fewest.
+
+So `sjp skew` and `sjp layout` can be pointed at one log and return advice that makes the
+other one quieter without making the job better. Neither command is wrong. Reading either
+alone is.
+
+### Rounding the target to whole rounds was not what made anything better
+
+The count the volume asks for here is 3 and the rounding takes it to 4. The argument for
+the rounding was that a part filled last round pays a whole task's wall time for a
+fraction of the slots. On two slots both 3 and 4 take two rounds, so the rounding removed
+no round at all.
+
+The stage wall between them is a ratio of 1.0419 at a p of 0.1429. Undecided, and
+directionally the rounded count is the slower one. The largest task is a ratio of 0.8470
+at a p of 0.0286, so the rounded count really does cut the worst task by about 15 percent
+and that result is separated.
+
+That benefit is a benefit of one more partition rather than of whole rounds. Eight
+partitions cuts the worst task further still. The rounding is kept because adding
+partitions to a stage like this splits the cold keys one more way, and the comment in
+`sjp/layout.py` now says that rather than the schedule argument it could not support.
+
+### What a reader should take from the table
+
+A partition count is the wrong instrument for skew, and this repo can now show that rather
+than assert it. The honest recommendation on a stage like this one is a different key or a
+salt, and neither is something an event log can propose, because the log carries no key
+distribution.
+
+There is a real limit on the numbers above. Two slots and one machine. A count that leaves
+cores idle on a two slot local session is not the same mistake it is on a real cluster,
+and nothing here has been run on one.
+
 ## Running the checks
 
 ```
 $ python tests/run_all.py
-276 passed, 0 failed, 276 checks
+322 passed, 0 failed, 322 checks
 ```
 
 Every check is graded by a mutation pass rather than counted.
@@ -587,6 +725,8 @@ Every check is graded by a mutation pass rather than counted.
 ```
 sjp/layout.py: 64 mutation sites, running 0 to 64
 64 killed, 0 survived, 0 ungraded, 64 graded
+sjp/bench.py: 38 mutation sites, running 0 to 38
+34 killed, 4 survived, 0 ungraded, 38 graded
 sjp/model.py: 44 mutation sites, running 0 to 44
 44 killed, 0 survived, 0 ungraded, 44 graded
 sjp/plan.py: 30 mutation sites, running 0 to 30
@@ -605,23 +745,35 @@ sjp/contract.py: 6 mutation sites, running 0 to 6
 6 killed, 0 survived, 0 ungraded, 6 graded
 scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
 19 killed, 1 survived, 0 ungraded, 20 graded
-jobs/sample.py: 20 mutation sites, running 0 to 20
-2 killed, 18 survived, 0 ungraded, 20 graded
+jobs/sample.py: 22 mutation sites, running 0 to 22
+2 killed, 20 survived, 0 ungraded, 22 graded
 ```
 
 The last row is the honest one. Every surviving mutant in `jobs/sample.py` sits in code
 that only runs with a Spark session, and a check cannot have one. What grades that module
 is the three logs it produced, which is weaker than a mutant and is not nothing.
 
-That row also got worse by three sites and killed none of them. The join job is more code
-in the same unreachable place, so the denominator moved and the numerator did not. Saying
-so is the point. A score that only ever gets quoted when it improves is not a measurement.
+That row has now got worse twice for the same reason. The join job added three sites and
+the skewed join added two more, all of them in the same unreachable place, so the
+denominator moves and the numerator does not. Saying so is the point. A score that only
+ever gets quoted when it improves is not a measurement.
 
 That row got worse on purpose. Two of its mutants used to die against checks that read the
 module's own constants back out of the module, which is transcription and would have gone
 stale the moment somebody changed the constant and the check together. Those were replaced
 by checks that read the same settings out of the committed logs instead. The score fell and
 the question being asked got better.
+
+The four survivors in `sjp/bench.py` are all boundary comparisons and all four were checked
+rather than waved through. One widens a float tolerance that already absorbs the
+difference, so the two forms give the same answer on every input tried and on every input
+where the values differ by more than a nanosecond. The other three separate a p value or a
+floor from the threshold at exactly equal, and a p value is a count over the number of
+splits. Four passes an arm puts that denominator at 70 and 0.05 of 70 is 3.5, so the case
+is not reachable on the schedule this repo runs. It is reachable at 2 passes against 14,
+which is not a benchmark anyone would run. The first pass at this module killed 24 of 38.
+Six survivors were guards checked against a value they must refuse and never against the
+smallest value they must accept, and four were records nothing asserted frozen.
 
 The one survivor in `scripts/fixture_probe.py` moves a `sys.path.insert` index from 0 to 1,
 which changes nothing about what gets imported here. It is left alone rather than tested.
@@ -709,3 +861,15 @@ that stage are missing rather than zero.
 A stage seen only through its task events declares no tasks, because the planned count
 lives on the submitted event. Nothing in either committed log exercises that and the check
 for it is built rather than captured.
+
+The benchmark ran on two slots on one machine. A partition count that leaves cores idle on
+a two slot local session is not the same mistake it is on a cluster, and the wave arithmetic
+in the partition target has only ever been tested where a wave is two tasks wide.
+
+Four passes an arm is the smallest schedule that can return a p under 0.05, so every
+comparison here either lands on the floor or lands nowhere. An effect real but smaller than
+these arms can separate reads as undecided, and undecided is not a finding of no difference.
+
+The benchmark logs are not committed. Four arms at four passes is about seventeen event logs
+and tens of megabytes, and the numbers above are reproducible from the command beside them
+rather than from a file in the tree.
