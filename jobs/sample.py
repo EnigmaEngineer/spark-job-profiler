@@ -1,4 +1,4 @@
-"""Three jobs, each carrying one pathology that is known before the log is read.
+"""Five jobs, each carrying one pathology that is known before the log is read.
 
 The first two do the same work over the same number of rows. One has a key distribution
 that puts most of the rows on a single reducer. The other spreads them. Everything else is
@@ -22,6 +22,12 @@ decoration either. Spark puts a partial aggregate in front of the shuffle whenev
 query lets it, and a partial aggregate over two hundred keys empties the shuffle of the
 very rows the skew is made of. The join has to carry every row across the boundary.
 
+The fifth is not a pathology. It is a shape the profiler was reading wrongly. A
+`repartition` call naming a column and no number asks Spark for a hash and says
+nothing about how many ways, so the count comes from the session exactly as it does
+when a join demands the partitioning. The exchange records a different origin, and
+reading that origin as a number somebody typed is what this job exists to catch.
+
 The point of these is not that they are realistic. It is that the pathology is known
 before the profiler is pointed at the log, so the profiler can be graded rather than
 believed.
@@ -36,10 +42,10 @@ SHUFFLE_PARTITIONS = 8
 # it if it were allowed to, which is the whole point of switching that off below.
 DIM_ROWS = COLD_KEYS
 
-JOBS = ("skewed", "balanced", "join", "skewed_join")
+JOBS = ("skewed", "balanced", "join", "skewed_join", "by_column")
 
 # The jobs whose key exchange Spark sizes from the session rather than from the query.
-CONFIG_SIZED = ("skewed_join",)
+CONFIG_SIZED = ("skewed_join", "by_column")
 
 # The jobs that must not be allowed to broadcast the small side.
 NO_BROADCAST = ("join", "skewed_join")
@@ -159,6 +165,13 @@ def run(job, out_dir, rows, partitions=None):
         frame = _keyed(spark, rows, skewed=job.startswith("skewed"))
         if job == "join":
             _grouped(frame.join(_labels(spark), on="key", how="inner")).collect()
+        elif job == "by_column":
+            from pyspark.sql import functions as F
+
+            # repartition(col) with no number. The aggregate that follows needs the rows
+            # grouped by key and they already are, so Spark adds no second exchange and
+            # the only hash in the plan is this one.
+            _joined_aggregate(frame.repartition(F.col("key"))).collect()
         elif job == "skewed_join":
             # Left, because the hot key is not in the small side and an inner join would
             # drop the eighty five percent of rows that are the whole pathology.

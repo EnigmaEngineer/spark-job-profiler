@@ -286,8 +286,8 @@ def check_capture_hands_the_parsed_arguments_straight_to_the_job():
 
     seen = {}
 
-    def run(job, out_dir, rows):
-        seen.update(job=job, out_dir=out_dir, rows=rows)
+    def run(job, out_dir, rows, partitions=None):
+        seen.update(job=job, out_dir=out_dir, rows=rows, partitions=partitions)
         return "/somewhere/local-1"
 
     # Built from the real module with one function replaced, rather than from the two
@@ -309,6 +309,11 @@ def check_capture_hands_the_parsed_arguments_straight_to_the_job():
     sys.modules["jobs.sample"] = stub
     try:
         code, text = _run(["capture", "--job", "balanced", "--out", "here", "--rows", "7"])
+        omitted = dict(seen)
+        seen.clear()
+        at_five, _ = _run(["capture", "--job", "by_column", "--out", "here",
+                           "--rows", "7", "--partitions", "5"])
+        given = dict(seen)
     finally:
         for name, module in saved.items():
             if module is None:
@@ -316,8 +321,15 @@ def check_capture_hands_the_parsed_arguments_straight_to_the_job():
             else:
                 sys.modules[name] = module
     assert code == 0, code
-    assert seen == {"job": "balanced", "out_dir": "here", "rows": 7}, seen
+    assert omitted == {"job": "balanced", "out_dir": "here", "rows": 7,
+                       "partitions": None}, omitted
     assert "wrote /somewhere/local-1" in text, text
+    # Omitting the flag has to arrive as None rather than as the default count. The job
+    # decides what no answer means, and a command that picks 8 here would be deciding it
+    # twice in two places.
+    assert at_five == 0, at_five
+    assert given == {"job": "by_column", "out_dir": "here", "rows": 7,
+                     "partitions": 5}, given
 
 
 def check_a_single_trailing_argument_is_refused_too():

@@ -44,6 +44,12 @@ def capture_parser():
     parser.add_argument("--job", required=True, choices=JOBS)
     parser.add_argument("--out", required=True, help="directory to write the log into")
     parser.add_argument("--rows", type=int, default=CAPTURE_DEFAULT_ROWS)
+    # The session's shuffle partition count. Only reaches a job that has not written a
+    # count into its own query, so on most of these it changes nothing. It is here because
+    # a fixture captured at a count other than the default needs a command that reproduces
+    # it, and a fixture nobody can regenerate is a number with a story attached.
+    parser.add_argument("--partitions", type=int,
+                        help="spark.sql.shuffle.partitions for the session")
     return parser
 
 
@@ -261,6 +267,6 @@ def capture(rest):
 
     # Imported here rather than at module level so that reading a log needs no pyspark.
     from jobs import sample
-    path = sample.run(args.job, args.out, args.rows)
+    path = sample.run(args.job, args.out, args.rows, args.partitions)
     print("wrote {}".format(path))
     return 0
