@@ -13,11 +13,13 @@ import dataclasses
 import math
 import os
 
-from sjp import eventlog, layout, plan
+from sjp import eventlog, layout, plan, skew
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGS = os.path.join(HERE, "fixtures", "eventlogs")
 SKEWED, BALANCED, JOIN = "skewed", "balanced", "join"
+SKEWED_JOIN = "skewed_join"
+BY_COLUMN = "by_column"
 
 # Rows going through the exchange in every committed log. The per row widths below are
 # divisions by this, so it is named once rather than written into each of them.
@@ -590,7 +592,9 @@ def check_a_disagreement_between_the_two_counts_is_said_out_loud():
                              estimated=100, written=100)
     assert not shuffle.counts_agree
     app = _app(JOIN)
-    lines = layout._shuffle_lines(shuffle, layout.size(shuffle, app.slots), app.slots)
+    lines = layout._shuffle_lines(
+        shuffle, layout.Advice(sizing=layout.size(shuffle, app.slots), withheld=False,
+                               why=""), app.slots)
     assert any("says 8 against the driver's 4" in line for line in lines)
 
 
@@ -599,7 +603,9 @@ def check_the_plan_text_carrying_no_count_checks_nothing():
                              changeable=True, declared=None, partitions=4,
                              estimated=100, written=100)
     app = _app(JOIN)
-    lines = layout._shuffle_lines(shuffle, layout.size(shuffle, app.slots), app.slots)
+    lines = layout._shuffle_lines(
+        shuffle, layout.Advice(sizing=layout.size(shuffle, app.slots), withheld=False,
+                               why=""), app.slots)
     assert any("carries no count, so it checks nothing" in line for line in lines)
 
 
@@ -623,3 +629,234 @@ def check_no_target_line_means_no_rounds_line():
     for job in (SKEWED, BALANCED):
         lines = layout.layout_lines(_app(job))
         assert not any("schedule after" in line for line in lines)
+
+
+# The guard that carries the benchmark. Everything below is about the one shape where the
+# volume arithmetic was measured and lost, and the control for it is the join log, whose
+# query is the same shape and whose key distribution is not.
+
+
+def check_an_exchange_names_exactly_one_writing_stage_on_every_log():
+    """The measured bytes and the stage's total of its tasks' write bytes are two readings
+    of one event, so the number has to pick out one stage and no more."""
+    for job in (SKEWED, BALANCED, JOIN, SKEWED_JOIN):
+        app, found = _shuffles(job)
+        for shuffle in found:
+            stage = layout.writing_stage(app, shuffle)
+            assert stage is not None, (job, shuffle.scheme)
+            assert stage.total("bytes_written") == shuffle.written
+
+
+def check_two_stages_writing_the_same_bytes_names_neither():
+    """A coincidence this cannot tell from a match. Built, because no committed log has
+    two stages agreeing to the byte and a refusal nothing reaches is a refusal nothing
+    grades."""
+    app = _app(JOIN)
+    shuffle = layout.Shuffle(scheme="hashpartitioning", origin=plan.CHOSEN_BY_SPARK,
+                             changeable=True, declared=8, partitions=8,
+                             estimated=100, written=0)
+    zeroes = [s for s in app.stages if s.total("bytes_written") == 0]
+    assert len(zeroes) == 1, "the join log should have exactly one stage writing nothing"
+    doubled = dataclasses.replace(app, stages=app.stages + (zeroes[0],))
+    assert layout.writing_stage(doubled, shuffle) is None
+
+
+def check_an_exchange_with_no_measured_bytes_names_no_stage():
+    shuffle = layout.Shuffle(scheme="hashpartitioning", origin=plan.CHOSEN_BY_SPARK,
+                             changeable=True, declared=8, partitions=8,
+                             estimated=100, written=None)
+    assert layout.writing_stage(_app(JOIN), shuffle) is None
+
+
+def check_the_reading_stage_is_the_writing_stage_s_child():
+    for job in (SKEWED, BALANCED, JOIN, SKEWED_JOIN):
+        app, found = _shuffles(job)
+        for shuffle in found:
+            upstream = layout.writing_stage(app, shuffle)
+            reader = layout.reading_stage(app, shuffle)
+            assert reader is not None, (job, shuffle.scheme)
+            assert upstream.stage_id in reader.parent_ids
+
+
+def check_a_writing_stage_with_no_child_names_no_reading_stage():
+    """The terminal stage of any log writes nothing downstream. Reached by handing the
+    function a stage nothing claims as a parent."""
+    app = _app(JOIN)
+    last = max(app.stages, key=lambda s: s.stage_id)
+    assert not any(last.stage_id in s.parent_ids for s in app.stages)
+    shuffle = layout.Shuffle(scheme="hashpartitioning", origin=plan.CHOSEN_BY_SPARK,
+                             changeable=True, declared=8, partitions=8, estimated=100,
+                             written=last.total("bytes_written"))
+    assert layout.writing_stage(app, shuffle) is last
+    assert layout.reading_stage(app, shuffle) is None
+
+
+def check_the_hot_key_verdict_separates_the_two_join_logs():
+    """The whole guard rests on this. Same query shape, same two hash exchanges, same cut
+    arithmetic. The only thing that moves is the key distribution."""
+    hot = layout.hot_key(_app(SKEWED_JOIN), _hash_exchange(SKEWED_JOIN))
+    assert hot.outcome == skew.SKEWED, hot
+    assert hot.ratio > 40, hot.ratio
+    cool = layout.hot_key(_app(JOIN), _hash_exchange(JOIN))
+    assert cool.outcome == skew.EVEN, cool
+
+
+def check_the_cut_is_withheld_on_the_skewed_join_and_not_on_the_join():
+    app, found = _shuffles(SKEWED_JOIN)
+    hashed = [s for s in found if s.scheme == layout.KEY_HASH]
+    assert hashed, "the skewed join log should carry a hash exchange"
+    for shuffle in hashed:
+        advice = layout.advise(app, shuffle)
+        assert advice.withheld, shuffle
+        assert advice.sizing.target < advice.sizing.current
+        assert "records_read" in advice.why
+
+    app, found = _shuffles(JOIN)
+    for shuffle in [s for s in found if s.scheme == layout.KEY_HASH]:
+        advice = layout.advise(app, shuffle)
+        assert not advice.withheld, shuffle
+
+
+def check_a_target_equal_to_the_current_count_is_not_withheld():
+    """The boundary between a cut and no cut, on the side that is not a cut.
+
+    `advise` returns early when the target is not below the current count. A guard written
+    with a strict comparison there falls through and withholds on a stage nothing was asking
+    to change, and the report then prints that the volume asks for 2 rather than 2. No
+    committed log lands on this, so the count is moved rather than the volume.
+
+    The volume is what has to stay fixed. `writing_stage` finds the stage by matching the
+    exchange's measured bytes against a stage total, so editing `written` here would stop any
+    stage matching and the guard would go quiet for an unrelated reason.
+    """
+    app = _app(SKEWED_JOIN)
+    hashed = _hash_exchange(SKEWED_JOIN)
+    assert layout.size(hashed, app.slots).target == 2
+    level = dataclasses.replace(hashed, partitions=2, declared=2)
+    sizing = layout.size(level, app.slots)
+    assert sizing.target == sizing.current == 2, sizing
+    advice = layout.advise(app, level)
+    assert not advice.withheld, advice
+    assert advice.why == ""
+    # The control. The same exchange at the count the log really used is a cut, the hot key
+    # is found, and it is withheld. So the comparison is what separates the two cases.
+    assert layout.advise(app, hashed).withheld
+
+
+def check_the_guard_goes_quiet_when_no_stage_carries_the_exchange_bytes():
+    """A property worth knowing, because it is a refusal that looks like a verdict.
+
+    The hot key is found through the stage whose write bytes equal the exchange's. An
+    exchange whose bytes match no stage has no reading stage, so the guard has nothing to
+    say and the cut is recommended. Advice is given unless this repo can show the cut hurts,
+    which is the right default and is not the same as having checked.
+    """
+    app = _app(SKEWED_JOIN)
+    orphan = dataclasses.replace(_hash_exchange(SKEWED_JOIN), written=400000000)
+    assert layout.writing_stage(app, orphan) is None
+    assert layout.hot_key(app, orphan) is None
+    advice = layout.advise(app, orphan)
+    assert advice.sizing.target < advice.sizing.current
+    assert not advice.withheld
+
+
+def check_a_raise_is_never_withheld():
+    """Adding partitions splits the cold keys further and the benchmark measured that
+    helping, so the guard has no argument against it. Built, because no committed log
+    asks for more partitions than it used."""
+    app = _app(SKEWED_JOIN)
+    raised = dataclasses.replace(_hash_exchange(SKEWED_JOIN), partitions=1, declared=1)
+    advice = layout.advise(app, raised)
+    assert advice.sizing.target > advice.sizing.current
+    assert not advice.withheld
+
+
+def check_round_robin_is_never_withheld_however_hot_the_next_stage_is():
+    """Round robin spreads rows without reading any key, so cutting its count does not
+    leave a hot key anywhere."""
+    app = _app(SKEWED_JOIN)
+    hashed = _hash_exchange(SKEWED_JOIN)
+    robin = dataclasses.replace(hashed, scheme="RoundRobinPartitioning")
+    assert layout.advise(app, hashed).withheld
+    assert not layout.advise(app, robin).withheld
+
+
+def check_withholding_takes_the_count_out_of_the_actionable_total():
+    """Three on the skewed join log before the guard, and the two that went are the cuts.
+    What is left is the broadcast candidate."""
+    assert layout.actionable(_app(SKEWED_JOIN)) == 1
+    assert layout.actionable(_app(JOIN)) == 3
+
+
+def check_the_report_prints_the_arithmetic_it_is_refusing_to_recommend():
+    """Hiding the number would read as the tool having nothing to say, and what it has to
+    say is that it measured this."""
+    lines = layout.layout_lines(_app(SKEWED_JOIN))
+    withheld = [line for line in lines if "40 to 52 percent slower" in line]
+    assert len(withheld) == 2, withheld
+    assert all("asks for 2 rather than 8" in line for line in withheld)
+    assert any("one key is most of the rows" in line for line in lines)
+    assert not any("schedule after" in line for line in lines)
+
+
+def check_the_skewed_join_key_exchange_still_measures_what_the_benchmark_measured():
+    """Captured on Java 21 against a reading first taken on Java 11, five weeks apart, and
+    the key exchange reproduces to the byte. A figure that survives a major runtime version
+    is the strongest evidence available that the runtime is not in it.
+
+    `python -m sjp capture --job skewed_join --out <dir> --rows 8000000` is what produced
+    the log this reads."""
+    shuffle = _hash_exchange(SKEWED_JOIN)
+    assert shuffle.written == 88788038
+    assert shuffle.partitions == 8
+    assert shuffle.origin == plan.CHOSEN_BY_SPARK
+
+
+def check_a_hash_the_query_left_uncounted_gets_the_advice():
+    """The positive control for the guard. A hash exchange, a cut, and no hot key behind it.
+
+    Without a log of this shape the guard could be withholding on every hash it sees and
+    every check here would still pass, because the only hash exchanges in the other logs
+    are either behind a hot key or already the right size.
+    """
+    app, found = _shuffles(BY_COLUMN)
+    hashed = [s for s in found if s.scheme == layout.KEY_HASH]
+    assert len(hashed) == 1, hashed
+    advice = layout.advise(app, hashed[0])
+    assert not advice.withheld, advice
+    assert advice.sizing.target == 2
+    assert advice.sizing.current == 8
+    assert advice.why == ""
+    assert layout.actionable(app) == 1
+
+
+def check_the_uncounted_hash_would_have_been_refused_by_the_old_origin_rule():
+    """What the fix changed, stated as the arithmetic rather than as the origin's name.
+
+    The exchange reads 119303250 bytes over 8 partitions against a 67108864 advisory, so
+    the volume has an opinion. Reading this origin as a number somebody typed threw that
+    opinion away and printed that the config does not decide the count.
+    """
+    app, found = _shuffles(BY_COLUMN)
+    hashed = [s for s in found if s.scheme == layout.KEY_HASH][0]
+    assert hashed.origin == plan.ASKED_BY_KEY
+    assert hashed.changeable is True
+    assert hashed.written == 119303250
+    assert hashed.partitions == 8
+    # `changeable` rather than `origin`, because the flag is a field on the exchange that
+    # `shuffles` fills in from the plan. Replacing the origin here would leave the flag
+    # alone and the check would pass while testing nothing.
+    refused = dataclasses.replace(hashed, changeable=False)
+    assert layout.size(refused, app.slots).target is None
+    assert "does not decide it" in layout.size(refused, app.slots).why
+    # And the flag does come from the origin, which is the join the fix travels through.
+    assert hashed.changeable is plan.partitioning_is_config_decided(hashed.origin)
+
+
+def check_advice_is_frozen():
+    advice = layout.Advice(sizing=None, withheld=False, why="")
+    try:
+        advice.withheld = True
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("Advice accepted an assignment")

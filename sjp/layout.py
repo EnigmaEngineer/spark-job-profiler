@@ -33,7 +33,7 @@ module exists for correctly has nothing to say.
 import math
 from dataclasses import dataclass
 
-from sjp import plan
+from sjp import plan, skew
 
 # Spark's documented default for spark.sql.adaptive.advisoryPartitionSizeInBytes. It is
 # Spark's number rather than one chosen here, which is the only reason a default is
@@ -149,9 +149,13 @@ def size(shuffle, slots, advisory=ADVISORY_BYTES):
     # part filled last round pays a whole task's wall time for a fraction of the slots.
     # That was never measured and it did not survive being measured. Running one job at 3
     # and at 4 on two slots, both counts take two rounds, so the rounding removed no round
-    # at all and the stage wall did not move. What it did move is the largest task, down
-    # 15 percent and separated, because the extra partition splits the keys one more way.
-    # So the count is kept and the reason is the split rather than the schedule.
+    # at all and the stage wall did not move.
+    #
+    # The replacement argument was that the extra partition splits the keys one more way
+    # and cuts the largest task. That was separated on one schedule at 0.8470 and
+    # undecided on a second at 0.9102, so it is a direction rather than an established
+    # result. The rounding is kept because nothing measured argues for removing it,
+    # which is a weaker reason than this comment used to give.
     target = int(math.ceil(target / slots) * slots)
     if target == current:
         why = "{} bytes over {} partitions is already inside the advisory size".format(
@@ -240,6 +244,109 @@ def candidates(app, root, threshold=BROADCAST_BYTES):
     return found
 
 
+# What Spark calls the partitioning when it hashes a key expression. Round robin is the
+# other scheme these logs carry and it spreads rows without looking at any key, so the
+# guard below has nothing to say about it.
+KEY_HASH = "hashpartitioning"
+
+# The one quantity read for a hot key. A hash decides which rows land in which partition,
+# so a stage whose tasks read very different row counts is reporting the key distribution
+# and nothing else. A duration spread would answer the same question through a slow
+# executor as well as through a hot key.
+KEY_METRIC = "records_read"
+
+
+@dataclass(frozen=True)
+class Advice:
+    """A sizing, and whether this repo has measured that taking it makes things worse."""
+    sizing: object
+    withheld: bool
+    why: str
+
+
+def writing_stage(app, shuffle):
+    """The stage that wrote this exchange, found by its measured bytes.
+
+    An exchange's measured bytes and the sum of its stage's per task shuffle write bytes
+    are two readings of one event, so the number identifies the stage. Matched on the
+    number rather than on the stage id because a join submits both sides at once and which
+    side gets the lower id depends on which one the scheduler took first.
+
+    None when the number does not pick out exactly one stage. Two stages writing the same
+    byte count is a coincidence this cannot tell from a match, and a guess there is worse
+    than a refusal.
+    """
+    if shuffle.written is None:
+        return None
+    found = [stage for stage in app.stages
+             if stage.total("bytes_written") == shuffle.written]
+    return found[0] if len(found) == 1 else None
+
+
+def reading_stage(app, shuffle):
+    """The stage whose work this exchange's partition count divides.
+
+    The count on an exchange decides how many pieces the next stage runs in, so that is
+    the stage a recommendation about the count is about. It is the writing stage's child.
+    None when the writing stage is unknown or does not have exactly one child.
+    """
+    upstream = writing_stage(app, shuffle)
+    if upstream is None:
+        return None
+    found = [stage for stage in app.stages if upstream.stage_id in stage.parent_ids]
+    return found[0] if len(found) == 1 else None
+
+
+def hot_key(app, shuffle, threshold=skew.DEFAULT_THRESHOLD, floors=None):
+    """The row count verdict on the stage this exchange feeds, or None.
+
+    None means the stage could not be named, which is different from a stage that was
+    named and came back even.
+    """
+    stage = reading_stage(app, shuffle)
+    if stage is None:
+        return None
+    return skew.judge(stage, KEY_METRIC, threshold, floors)
+
+
+def advise(app, shuffle, advisory=ADVISORY_BYTES, threshold=skew.DEFAULT_THRESHOLD,
+           floors=None):
+    """The sizing, plus the one case where this repo measured the sizing to be wrong.
+
+    `size` is arithmetic over a total and a total cannot see a distribution. There is one
+    shape where that arithmetic was benchmarked and it lost, on two separate schedules
+    five weeks apart. Cutting the count on a hash partitioning whose next stage is
+    carrying a hot key left the stage wall undecided both times, at ratios of 0.9916 and
+    1.0797. It made the largest task slower both times and separated both times, at
+    ratios of 1.3979 and 1.5170 against a p floor of 0.0286. A hash sends one key to one
+    partition at any count, so a cut moves every other key onto fewer partitions and the
+    hot task carries more of them.
+
+    This is the only comparison in the benchmark that separated on both schedules, which
+    is the reason the guard rests on it rather than on any of the others.
+
+    Only a cut is withheld. Raising the count on such a stage splits the cold keys further
+    and the same benchmark measured that helping, so the guard has no reason to block it.
+
+    Withheld rather than reversed. Nothing here measures what the right count is on a
+    stage like that. The honest answer is a different key or a salt and an event log
+    carries no key distribution to propose one from.
+    """
+    sizing = size(shuffle, app.slots, advisory)
+    if sizing.target is None or sizing.target >= sizing.current:
+        return Advice(sizing=sizing, withheld=False, why="")
+    if shuffle.scheme != KEY_HASH:
+        return Advice(sizing=sizing, withheld=False, why="")
+    verdict = hot_key(app, shuffle, threshold, floors)
+    if verdict is None or verdict.outcome != skew.SKEWED:
+        return Advice(sizing=sizing, withheld=False, why="")
+    return Advice(
+        sizing=sizing, withheld=True,
+        why="stage {} reads {} on {}, so one key is most of the rows and a hash keeps it "
+            "on one partition at any count".format(
+                verdict.stage_id, skew.plain(verdict.ratio), KEY_METRIC))
+
+
 def actionable(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
     """How many things in this log this command has an opinion about.
 
@@ -250,7 +357,8 @@ def actionable(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
     A broadcast candidate counts. So does a partition count the config decides and the
     measured volume disagrees with. An exchange whose count is written into the query
     counts for nothing however far from the advisory size it sits, because there is no
-    advice to give about it.
+    advice to give about it. Neither does a cut `advise` withheld, because a number the
+    report is arguing against is not a thing it is asking anybody to change.
     """
     found = 0
     for info in app.plans:
@@ -258,19 +366,23 @@ def actionable(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
         found += sum(1 for candidate in candidates(app, root, threshold)
                      if candidate.worth_it)
         for shuffle in shuffles(app, root):
-            sizing = size(shuffle, app.slots, advisory)
+            advice = advise(app, shuffle, advisory)
+            sizing = advice.sizing
+            if advice.withheld:
+                continue
             if sizing.target is not None and sizing.target != sizing.current:
                 found += 1
     return found
 
 
-def _shuffle_lines(shuffle, sizing, slots):
+def _shuffle_lines(shuffle, advice, slots):
     """The block one exchange prints.
 
     Its own function because most of the branches below are about a shape no
     committed log reaches. Left inline they could only be reached through a whole
     application, which is how a branch ends up graded on nothing.
     """
+    sizing = advice.sizing
     lines = []
     if shuffle.partitions is None:
         lines.append("  {} with no partition count reported  chosen by {}".format(
@@ -308,6 +420,14 @@ def _shuffle_lines(shuffle, sizing, slots):
             sizing.current_waves[1] or slots))
     if sizing.target is None:
         lines.append("      {:<13} none. {}".format("partitions", sizing.why))
+    elif advice.withheld:
+        # The arithmetic is still shown. Hiding it would make the refusal look like the
+        # tool had nothing to say, and what it has to say is that it measured this.
+        lines.append("      {:<13} none. the volume asks for {} rather than {}, and "
+                     "taking that cut was measured here to leave the stage wall alone "
+                     "and make the largest task 40 to 52 percent slower".format(
+                         "partitions", sizing.target, sizing.current))
+        lines.append("      {:<13} {}".format("why", advice.why))
     else:
         lines.append("      {:<13} {} rather than {}. {}".format(
             "partitions", sizing.target, sizing.current, sizing.why))
@@ -336,7 +456,7 @@ def layout_lines(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
         root = plan.read(info)
         for shuffle in shuffles(app, root):
             lines.extend(_shuffle_lines(
-                shuffle, size(shuffle, app.slots, advisory), app.slots))
+                shuffle, advise(app, shuffle, advisory), app.slots))
         for found in candidates(app, root, threshold):
             verdict = "broadcast it" if found.worth_it else "leave it shuffled"
             lines.append("  {} side of {}  {}".format(
