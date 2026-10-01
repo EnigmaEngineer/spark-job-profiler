@@ -103,12 +103,13 @@ of what the other one shuffled is not reported as worth it however small it is.
 ## A stage id is not stable across two runs of this job
 
 The join job was captured twice while settling the log directory name. Same code, same row
-count, same configuration.
+count, same configuration. Only one of those two logs is committed here, so the pair below is
+written down rather than printed by anything.
 
-```
-first capture   spill on stage 1   small side on stage 0
-second capture  spill on stage 0   small side on stage 2
-```
+| | spill | small side |
+| --- | --- | --- |
+| first capture | stage 1 | stage 0 |
+| second capture | stage 0 | stage 2 |
 
 Every stage moved. The two sides of a join are submitted together and whichever is
 scheduled first takes the lower id, so on a plan that is not a straight line an id is a

@@ -1,13 +1,15 @@
-# ADR 0004: what the log cannot say about memory pressure
+# What the log cannot say about memory pressure
 
-Date: 2026-09-27. Status: accepted.
+## Status
+
+Accepted. The measurements below removed three planned metrics.
 
 ## Context
 
-The profiler is meant to say where a job spilled and what memory pressure caused it. Spill is
-in the event log. Pressure, in the sense a person means it, is the relationship between what an operator
-needed and what it was allowed. Three metrics were planned to express that and the
-measurements removed all three.
+The profiler is meant to say where a job spilled and what memory pressure caused it. Spill
+is in the event log. Pressure, in the sense a person means it, is the relationship between
+what an operator needed and what it was allowed. Three metrics were planned to express that
+and the measurements removed all three.
 
 ## The measurements, in one place
 
