@@ -18,6 +18,16 @@ from sjp import eventlog, plan
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGS = os.path.join(HERE, "fixtures", "eventlogs")
 SKEWED, BALANCED, JOIN = "skewed", "balanced", "join"
+SKEWED_JOIN, BY_COLUMN, BY_COLUMN_AT_5 = "skewed_join", "by_column", "by_column_at_5"
+
+# The session's shuffle partition count for each committed log. Two of these ran the same
+# query at two counts, which is the control under the changeable rule below.
+SESSION_PARTITIONS = {SKEWED: 8, BALANCED: 8, JOIN: 8, SKEWED_JOIN: 8, BY_COLUMN: 8,
+                      BY_COLUMN_AT_5: 5}
+
+# Every `repartition` call in the sample jobs that names a number names this one, so an
+# exchange carrying a typed count reads 8 in every log however the session was configured.
+TYPED_PARTITIONS = 8
 
 
 def _only_log(job):
@@ -60,10 +70,13 @@ def check_a_nested_bracket_does_not_end_a_field_early():
 # --- partitioning, read off all three committed logs ---
 
 def check_every_exchange_in_every_committed_log_parses_to_a_declared_count():
-    for job in (SKEWED, BALANCED, JOIN):
+    for job, session in SESSION_PARTITIONS.items():
         for node in plan.exchanges(_root(job)):
             how = plan.partitioning(node)
-            assert how.declared == 8, (job, node.simple, how)
+            # Keyed on the origin read out of the text rather than on `changeable`, which
+            # is the property these checks are here to grade.
+            expected = (TYPED_PARTITIONS if how.origin == plan.CHOSEN_BY_HAND else session)
+            assert how.declared == expected, (job, node.simple, how)
             assert how.scheme in ("hashpartitioning", "RoundRobinPartitioning"), how
 
 
@@ -75,18 +88,79 @@ def check_the_committed_logs_carry_both_origins_so_the_rule_is_exercised_both_wa
     choose two of its three.
     """
     origins = {}
-    for job in (SKEWED, BALANCED, JOIN):
+    for job in (SKEWED, BALANCED, JOIN, BY_COLUMN):
         origins[job] = sorted({plan.partitioning(node).origin
                                for node in plan.exchanges(_root(job))})
     assert origins[SKEWED] == [plan.CHOSEN_BY_HAND]
     assert origins[BALANCED] == [plan.CHOSEN_BY_HAND]
     assert origins[JOIN] == [plan.CHOSEN_BY_SPARK, plan.CHOSEN_BY_HAND]
+    assert origins[BY_COLUMN] == [plan.ASKED_BY_KEY, plan.CHOSEN_BY_HAND]
 
 
-def check_only_an_ensure_requirements_exchange_reads_as_changeable():
+def check_all_three_origins_appear_in_the_committed_logs():
+    """Every branch of the changeable rule is reached by a log rather than by an example.
+
+    The third origin was the one nothing reached, and while nothing reached it the rule
+    read `origin == CHOSEN_BY_SPARK` and was wrong in a direction no check could see.
+    """
+    seen = set()
+    for job in SESSION_PARTITIONS:
+        seen.update(plan.partitioning(node).origin for node in plan.exchanges(_root(job)))
+    assert seen == {plan.CHOSEN_BY_SPARK, plan.CHOSEN_BY_HAND, plan.ASKED_BY_KEY}, seen
+
+
+def check_the_join_log_reads_two_of_its_three_exchanges_as_changeable():
     changeable = [plan.partitioning(node).changeable for node in plan.exchanges(_root(JOIN))]
     assert changeable.count(True) == 2
     assert changeable.count(False) == 1
+
+
+def check_a_repartition_on_a_column_reads_as_changeable():
+    """The regression. A hash the query asked for without a count is the config's count.
+
+    Before this, `changeable` compared the origin to one name and this exchange fell
+    through to False, so the tool refused to advise on it and printed that the config does
+    not decide a count the config decides.
+    """
+    found = [plan.partitioning(node) for node in plan.exchanges(_root(BY_COLUMN))
+             if plan.partitioning(node).origin == plan.ASKED_BY_KEY]
+    assert len(found) == 1, found
+    assert found[0].changeable is True
+    assert found[0].scheme == "hashpartitioning"
+    # The control. The old rule is still a correct reading of the other two origins, so
+    # the bug was invisible to any check that did not hold a log carrying this one.
+    assert found[0].origin != plan.CHOSEN_BY_SPARK
+
+
+def check_the_same_query_declares_the_session_count_rather_than_a_fixed_one():
+    """Two logs, one query, two session counts. This is why the count is called the config's.
+
+    Without a second count the claim rests on the origin's name. A name is Spark's word for
+    what happened and this is the measurement.
+    """
+    counts = {}
+    for job in (BY_COLUMN, BY_COLUMN_AT_5):
+        found = [plan.partitioning(node) for node in plan.exchanges(_root(job))
+                 if plan.partitioning(node).origin == plan.ASKED_BY_KEY]
+        assert len(found) == 1, (job, found)
+        counts[job] = found[0].declared
+    assert counts[BY_COLUMN] == 8, counts
+    assert counts[BY_COLUMN_AT_5] == 5, counts
+    assert counts[BY_COLUMN] != counts[BY_COLUMN_AT_5]
+
+
+def check_one_log_holds_a_count_the_session_moved_and_a_count_it_did_not():
+    """The same evidence inside a single log, which is harder to argue with than two.
+
+    The log ran at 5. Its round robin exchange was handed 8 by the query and still reads 8.
+    Its hash exchange was handed nothing and reads 5. One session count, two exchanges, and
+    only the one the query left open moved.
+    """
+    by_origin = {}
+    for node in plan.exchanges(_root(BY_COLUMN_AT_5)):
+        how = plan.partitioning(node)
+        by_origin[how.origin] = how.declared
+    assert by_origin == {plan.CHOSEN_BY_HAND: 8, plan.ASKED_BY_KEY: 5}, by_origin
 
 
 def check_a_scheme_with_no_count_declares_none_rather_than_one():

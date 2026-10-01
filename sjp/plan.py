@@ -8,11 +8,13 @@ Which shuffles are joins. A stage boundary looks the same whether it feeds an ag
 a join, so nothing in the stage model can tell a shuffle that a broadcast would remove from
 one that nothing would.
 
-Where a partition count came from. An exchange carries its origin, and the two origins in
-this repo mean opposite things to a recommendation. `REPARTITION_BY_NUM` is a number
-somebody typed into a `repartition` call. `ENSURE_REQUIREMENTS` is a number Spark took from
-`spark.sql.shuffle.partitions`. Advising a config change on the first one is advice that
-does nothing.
+Where a partition count came from. An exchange carries its origin, and the origins split
+into two groups that mean opposite things to a recommendation. `REPARTITION_BY_NUM` is a
+number somebody typed into a `repartition` call. `ENSURE_REQUIREMENTS` is a number Spark
+took from `spark.sql.shuffle.partitions`, and so is `REPARTITION_BY_COL`, which is what a
+`repartition` call naming a column and no count produces. Advising a config change on the
+first one is advice that does nothing. Reading either of the others as a typed number is
+the same error the other way round, and it withholds advice that would have worked.
 
 A plan node names its metrics by accumulator id and carries no values. The values are on
 the stages, except for the three that are only ever reported by the driver. `Application`
@@ -37,6 +39,25 @@ EXCHANGE = "Exchange"
 # What the exchange's origin means for whether a count can be changed at all.
 CHOSEN_BY_SPARK = "ENSURE_REQUIREMENTS"
 CHOSEN_BY_HAND = "REPARTITION_BY_NUM"
+# A `repartition` naming a column and no count. The query asked for a hash on that column
+# and said nothing about how many ways, so the count is the session's. Measured rather than
+# read off the name: the same query at 5 shuffle partitions writes `hashpartitioning(key#4,
+# 5)` and at 8 writes 8, both with this origin.
+ASKED_BY_KEY = "REPARTITION_BY_COL"
+
+# The origins whose count `spark.sql.shuffle.partitions` decides. Membership is the whole
+# test, so a fourth origin arriving is a decision rather than a default.
+CONFIG_DECIDED = (CHOSEN_BY_SPARK, ASKED_BY_KEY)
+
+
+def partitioning_is_config_decided(origin):
+    """Whether `spark.sql.shuffle.partitions` decides the count on this origin.
+
+    The same test `Partitioning.changeable` applies, reachable without building a node. It
+    exists because the flag is copied onto other records and a copy is where the two can
+    drift apart.
+    """
+    return origin in CONFIG_DECIDED
 
 
 class UnreadablePlan(Exception):
@@ -128,8 +149,14 @@ class Partitioning:
 
     @property
     def changeable(self):
-        """Whether `spark.sql.shuffle.partitions` is what decides this count."""
-        return self.origin == CHOSEN_BY_SPARK
+        """Whether `spark.sql.shuffle.partitions` is what decides this count.
+
+        A list rather than one name. This read `origin == CHOSEN_BY_SPARK` for a while and
+        the bug it hid is the reason the list exists. A `repartition` on a column with no
+        count fell through to not changeable, so the tool refused to advise on an exchange
+        it could advise on, and said the config does not decide a count the config decides.
+        """
+        return partitioning_is_config_decided(self.origin)
 
 
 def partitioning(node):
