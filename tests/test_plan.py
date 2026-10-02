@@ -29,27 +29,23 @@ SESSION_PARTITIONS = {SKEWED: 8, BALANCED: 8, JOIN: 8, SKEWED_JOIN: 8, BY_COLUMN
 # exchange carrying a typed count reads 8 in every log however the session was configured.
 TYPED_PARTITIONS = 8
 
-
 def _only_log(job):
     directory = os.path.join(LOGS, job)
     names = [n for n in sorted(os.listdir(directory)) if not n.endswith(".md")]
     assert len(names) == 1, names
     return os.path.join(directory, names[0])
 
-
 def _root(job):
     app = eventlog.profile(_only_log(job))
     assert app.plans, "{} carries no plan".format(job)
     return plan.read(app.plans[0])
 
-
-# --- the field splitter, and the comma that breaks the naive version ---
+# the field splitter, and the comma that breaks the naive version
 
 def check_fields_split_at_bracket_depth_zero_and_not_on_every_comma():
     text = "Exchange hashpartitioning(key#4, 8), ENSURE_REQUIREMENTS"
     assert plan._fields(text) == ["Exchange hashpartitioning(key#4, 8)",
                                  "ENSURE_REQUIREMENTS"]
-
 
 def check_splitting_on_every_comma_would_read_the_partition_count_as_the_origin():
     """The control. Without the depth rule the second field is ` 8)` and looks like a name.
@@ -62,12 +58,10 @@ def check_splitting_on_every_comma_would_read_the_partition_count_as_the_origin(
     assert naive[1] == "8)"
     assert plan._fields(text)[1] == "ENSURE_REQUIREMENTS"
 
-
 def check_a_nested_bracket_does_not_end_a_field_early():
     assert plan._fields("a(b(c, d), e), f") == ["a(b(c, d), e)", "f"]
 
-
-# --- partitioning, read off all three committed logs ---
+# partitioning, read off all three committed logs
 
 def check_every_exchange_in_every_committed_log_parses_to_a_declared_count():
     for job, session in SESSION_PARTITIONS.items():
@@ -78,7 +72,6 @@ def check_every_exchange_in_every_committed_log_parses_to_a_declared_count():
             expected = (TYPED_PARTITIONS if how.origin == plan.CHOSEN_BY_HAND else session)
             assert how.declared == expected, (job, node.simple, how)
             assert how.scheme in ("hashpartitioning", "RoundRobinPartitioning"), how
-
 
 def check_the_committed_logs_carry_both_origins_so_the_rule_is_exercised_both_ways():
     """Neither origin is a case only one fixture reaches.
@@ -96,7 +89,6 @@ def check_the_committed_logs_carry_both_origins_so_the_rule_is_exercised_both_wa
     assert origins[JOIN] == [plan.CHOSEN_BY_SPARK, plan.CHOSEN_BY_HAND]
     assert origins[BY_COLUMN] == [plan.ASKED_BY_KEY, plan.CHOSEN_BY_HAND]
 
-
 def check_all_three_origins_appear_in_the_committed_logs():
     """Every branch of the changeable rule is reached by a log rather than by an example.
 
@@ -108,12 +100,10 @@ def check_all_three_origins_appear_in_the_committed_logs():
         seen.update(plan.partitioning(node).origin for node in plan.exchanges(_root(job)))
     assert seen == {plan.CHOSEN_BY_SPARK, plan.CHOSEN_BY_HAND, plan.ASKED_BY_KEY}, seen
 
-
 def check_the_join_log_reads_two_of_its_three_exchanges_as_changeable():
     changeable = [plan.partitioning(node).changeable for node in plan.exchanges(_root(JOIN))]
     assert changeable.count(True) == 2
     assert changeable.count(False) == 1
-
 
 def check_a_repartition_on_a_column_reads_as_changeable():
     """The regression. A hash the query asked for without a count is the config's count.
@@ -131,7 +121,6 @@ def check_a_repartition_on_a_column_reads_as_changeable():
     # the bug was invisible to any check that did not hold a log carrying this one.
     assert found[0].origin != plan.CHOSEN_BY_SPARK
 
-
 def check_the_same_query_declares_the_session_count_rather_than_a_fixed_one():
     """Two logs, one query, two session counts. This is why the count is called the config's.
 
@@ -148,7 +137,6 @@ def check_the_same_query_declares_the_session_count_rather_than_a_fixed_one():
     assert counts[BY_COLUMN_AT_5] == 5, counts
     assert counts[BY_COLUMN] != counts[BY_COLUMN_AT_5]
 
-
 def check_one_log_holds_a_count_the_session_moved_and_a_count_it_did_not():
     """The same evidence inside a single log, which is harder to argue with than two.
 
@@ -162,7 +150,6 @@ def check_one_log_holds_a_count_the_session_moved_and_a_count_it_did_not():
         by_origin[how.origin] = how.declared
     assert by_origin == {plan.CHOSEN_BY_HAND: 8, plan.ASKED_BY_KEY: 5}, by_origin
 
-
 def check_a_scheme_with_no_count_declares_none_rather_than_one():
     """`SinglePartition` carries no number, so filling one in would be inventing a reading.
 
@@ -175,12 +162,10 @@ def check_a_scheme_with_no_count_declares_none_rather_than_one():
     assert how.scheme == "SinglePartition"
     assert how.changeable is True
 
-
 def check_the_plan_id_suffix_is_stripped_rather_than_read_as_an_origin():
     node = plan.Node(name=plan.EXCHANGE, metrics={}, children=(),
                      simple="Exchange RoundRobinPartitioning(8), REPARTITION_BY_NUM, [plan_id=26]")
     assert plan.partitioning(node).origin == plan.CHOSEN_BY_HAND
-
 
 def check_partitioning_refuses_a_node_that_is_not_an_exchange():
     node = plan.Node(name="Sort", simple="Sort [key#4 ASC]", metrics={}, children=())
@@ -190,8 +175,7 @@ def check_partitioning_refuses_a_node_that_is_not_an_exchange():
         return
     raise AssertionError("a sort was read as an exchange")
 
-
-# --- finding the joins, and the two logs that have none ---
+# finding the joins, and the two logs that have none
 
 def check_the_two_aggregate_logs_hold_no_join_at_all():
     """The reason a third log was captured. A broadcast recommender graded on these two
@@ -199,11 +183,9 @@ def check_the_two_aggregate_logs_hold_no_join_at_all():
     for job in (SKEWED, BALANCED):
         assert plan.joins(_root(job)) == []
 
-
 def check_the_join_log_holds_one_sort_merge_join():
     found = plan.joins(_root(JOIN))
     assert [node.name for node in found] == ["SortMergeJoin"]
-
 
 def check_a_join_has_two_sides_and_each_one_has_an_exchange_under_it():
     join = plan.joins(_root(JOIN))[0]
@@ -211,7 +193,6 @@ def check_a_join_has_two_sides_and_each_one_has_an_exchange_under_it():
     assert len(pairs) == 2
     assert all(exchange is not None for _child, exchange in pairs)
     assert all(exchange.is_exchange for _child, exchange in pairs)
-
 
 def check_the_two_sides_of_the_join_reach_two_different_exchanges():
     """Both sides walking down to the same node would make every size comparison equal.
@@ -223,13 +204,11 @@ def check_the_two_sides_of_the_join_reach_two_different_exchanges():
     left, right = [exchange for _child, exchange in plan.sides(join)]
     assert left.metrics != right.metrics
 
-
 def check_a_side_carrying_no_exchange_answers_none_rather_than_raising():
     """A broadcast join's build side is not shuffled at all, so this is the shape a log
     that already took the advice has."""
     node = plan.Node(name="Sort", simple="Sort", metrics={}, children=())
     assert plan.feeding_exchange(node) is None
-
 
 def check_sides_refuses_a_node_that_does_not_have_two_of_them():
     node = plan.Node(name="BroadcastHashJoin", simple="", metrics={}, children=())
@@ -239,8 +218,7 @@ def check_sides_refuses_a_node_that_does_not_have_two_of_them():
         return
     raise AssertionError("a join with no children was read as having two sides")
 
-
-# --- metrics are addressed by id, because the names are not unique ---
+# metrics are addressed by id, because the names are not unique
 
 def check_a_node_reporting_one_metric_name_twice_is_refused():
     info = {"nodeName": "Exchange", "simpleString": "", "children": [],
@@ -252,7 +230,6 @@ def check_a_node_reporting_one_metric_name_twice_is_refused():
         return
     raise AssertionError("two ids under one name were read as one metric")
 
-
 def check_walk_reaches_every_node_and_not_only_the_first_child():
     root = _root(JOIN)
     names = [node.name for node in plan.walk(root)]
@@ -260,8 +237,7 @@ def check_walk_reaches_every_node_and_not_only_the_first_child():
     assert "SortMergeJoin" in names
     assert names[0] == root.name
 
-
-# --- what the mutation pass asked for ---
+# what the mutation pass asked for
 
 def _refuses_an_edit(record, attribute):
     try:
@@ -270,13 +246,11 @@ def _refuses_an_edit(record, attribute):
         return True
     return False
 
-
 def check_the_plan_records_are_frozen():
     """Read once and passed around. A caller that could edit a partitioning would be
     editing the log's own account of what Spark did."""
     assert _refuses_an_edit(plan.Node(name="x", simple="", metrics={}, children=()), "name")
     assert _refuses_an_edit(plan.Partitioning(scheme="x", declared=1, origin="y"), "scheme")
-
 
 def check_an_exchange_with_no_origin_field_reads_as_an_empty_origin():
     """Spark truncates a long simple string, so a node carrying only its partitioning is
@@ -287,7 +261,6 @@ def check_an_exchange_with_no_origin_field_reads_as_an_empty_origin():
     assert how.origin == ""
     assert how.changeable is False
     assert how.scheme == "SinglePartition"
-
 
 def check_a_truncated_partitioning_does_not_read_as_a_count():
     """An opening bracket with no closing one. The two tests have to both hold, because
@@ -300,7 +273,6 @@ def check_a_truncated_partitioning_does_not_read_as_a_count():
     # a string that was cut off would be a name this could not see the end of, and it
     # reads identically to a name it did.
     assert how.scheme == "hashpartitioning(key#4, 8, ENSURE_REQUIREMENTS"
-
 
 def check_an_empty_argument_list_declares_no_count_rather_than_raising():
     node = plan.Node(name=plan.EXCHANGE, metrics={}, children=(),

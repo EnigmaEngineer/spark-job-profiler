@@ -22,16 +22,13 @@ BALANCED = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
 PEAK = "internal.metrics.peakExecutionMemory"
 GROUPING_STAGE = 2
 
-
 def _only_log(directory):
     names = [n for n in sorted(os.listdir(directory)) if not n.endswith(".md")]
     assert len(names) == 1, names
     return os.path.join(directory, names[0])
 
-
 def _app(directory):
     return eventlog.profile(_only_log(directory))
-
 
 def spark_names_in(source):
     """Every Spark event name written as a string literal in some source text."""
@@ -42,12 +39,10 @@ def spark_names_in(source):
                 found.add(node.value)
     return found
 
-
 def check_the_model_reads_no_event_name_it_did_not_register():
     with open(MODEL_SOURCE, encoding="utf-8") as handle:
         found = spark_names_in(handle.read())
     assert found == set(model.CONSUMES), sorted(found ^ set(model.CONSUMES))
-
 
 def check_the_derivation_check_catches_a_name_that_was_never_registered():
     """Otherwise the check above passes on a module with a hand written name in it."""
@@ -56,14 +51,12 @@ def check_the_derivation_check_catches_a_name_that_was_never_registered():
     assert found == {"SparkListenerBlockManagerAdded"}, found
     assert not found <= set(model.CONSUMES), found
 
-
 def check_every_registered_handler_fires_on_a_real_log():
     """A registry carrying an entry no log reaches is a list kept by hand again."""
     for directory in (SKEWED, BALANCED):
         app = _app(directory)
         assert app.events_used == frozenset(model.CONSUMES), sorted(
             app.events_used ^ frozenset(model.CONSUMES))
-
 
 def check_registering_one_name_twice_is_refused():
     try:
@@ -72,7 +65,6 @@ def check_registering_one_name_twice_is_refused():
         pass
     else:
         raise AssertionError("one event name was handled twice")
-
 
 def check_an_event_with_no_handler_is_skipped_rather_than_refused():
     app = model.build([
@@ -84,7 +76,6 @@ def check_an_event_with_no_handler_is_skipped_rather_than_refused():
     assert "SparkListenerSomethingNewInTheNextVersion" not in app.events_used, app.events_used
     assert len(app.stages) == 1, app.stages
 
-
 def check_a_file_with_no_application_start_is_refused():
     try:
         model.build([{"Event": "SparkListenerJobStart", "Job ID": 0}])
@@ -92,7 +83,6 @@ def check_a_file_with_no_application_start_is_refused():
         pass
     else:
         raise AssertionError("a log with no application in it built an application")
-
 
 def check_an_application_that_ran_no_stages_is_refused():
     try:
@@ -102,7 +92,6 @@ def check_an_application_that_ran_no_stages_is_refused():
         pass
     else:
         raise AssertionError("an application with no stages built anyway")
-
 
 def check_the_application_carries_what_the_log_says_about_the_run():
     app = _app(SKEWED)
@@ -114,14 +103,12 @@ def check_the_application_carries_what_the_log_says_about_the_run():
     assert app.jobs[0].stage_ids == (0, 1, 2), app.jobs[0]
     assert app.jobs[0].result == "JobSucceeded", app.jobs[0]
 
-
 def check_every_stage_a_job_names_was_actually_built():
     for directory in (SKEWED, BALANCED):
         app = _app(directory)
         built = {stage.stage_id for stage in app.stages}
         for job in app.jobs:
             assert set(job.stage_ids) <= built, (job.stage_ids, built)
-
 
 def check_asking_for_a_stage_that_is_not_there_raises():
     try:
@@ -131,13 +118,11 @@ def check_asking_for_a_stage_that_is_not_there_raises():
     else:
         raise AssertionError("a stage nobody ran came back")
 
-
 def check_spark_planned_as_many_tasks_as_it_ran():
     """A retry would break this and there is no retry in either fixture."""
     for directory in (SKEWED, BALANCED):
         for stage in _app(directory).stages:
             assert len(stage.tasks) == stage.declared_tasks, (stage.stage_id, stage.tasks)
-
 
 def check_a_task_duration_is_a_subtraction_and_not_the_executor_run_time():
     stage = _app(SKEWED).stage(GROUPING_STAGE)
@@ -146,14 +131,12 @@ def check_a_task_duration_is_a_subtraction_and_not_the_executor_run_time():
         assert task.outside_run_time == task.duration - task.executor_run_time, task
         assert task.executor_run_time < task.duration, task
 
-
 def check_the_records_and_the_durations_are_not_the_same_column():
     """Both are read off one task and a swap between them would go unnoticed."""
     for directory in (SKEWED, BALANCED):
         stage = _app(directory).stage(1)
         assert stage.median("records_read") == 1000000, stage.median("records_read")
         assert stage.largest("duration") < 10000, stage.largest("duration")
-
 
 def check_a_stage_with_no_median_has_no_spread_rather_than_a_spread_of_zero():
     """It answered 0.0 before the detector was written, which reads as perfectly even.
@@ -167,19 +150,16 @@ def check_a_stage_with_no_median_has_no_spread_rather_than_a_spread_of_zero():
     assert stage.spread("records_read") is None, stage.spread("records_read")
     assert stage.spread("duration") > 0, stage.spread("duration")
 
-
 def check_the_absent_spread_is_printed_as_words_rather_than_as_a_blank():
     stage = _app(SKEWED).stage(0)
     assert model.spread_text(stage, "records_read") == "no median to divide by"
     assert model.spread_text(stage, "duration") == "1.00", model.spread_text(stage, "duration")
-
 
 def check_the_spread_is_the_largest_over_the_median():
     stage = _app(SKEWED).stage(GROUPING_STAGE)
     expected = stage.largest("records_read") / stage.median("records_read")
     assert stage.spread("records_read") == expected, stage.spread("records_read")
     assert round(stage.spread("records_read"), 2) == 44.22, stage.spread("records_read")
-
 
 def check_every_stage_total_the_log_reports_equals_the_sum_over_its_tasks():
     """Twelve metrics over six stages. The totals are right and that is the problem."""
@@ -188,7 +168,6 @@ def check_every_stage_total_the_log_reports_equals_the_sum_over_its_tasks():
             assert model.disagreements(stage) == [], (stage.stage_id,
                                                       model.disagreements(stage))
 
-
 def check_that_agreement_check_would_notice_a_stage_whose_tasks_moved():
     """A comparison that has never failed is indistinguishable from one comparing nothing."""
     stage = _app(SKEWED).stage(GROUPING_STAGE)
@@ -196,7 +175,6 @@ def check_that_agreement_check_would_notice_a_stage_whose_tasks_moved():
     names = [name for name, _reported, _summed in model.disagreements(damaged)]
     assert "internal.metrics.memoryBytesSpilled" in names, names
     assert "internal.metrics.executorRunTime" in names, names
-
 
 def check_a_total_that_measured_zero_is_absent_rather_than_zero():
     """The key set is a property of the data. Both directions are asserted here."""
@@ -210,13 +188,11 @@ def check_a_total_that_measured_zero_is_absent_rather_than_zero():
     present = {total.name for total in spilled.totals}
     assert "internal.metrics.memoryBytesSpilled" in present, sorted(present)
 
-
 def check_two_runs_of_almost_the_same_job_report_different_numbers_of_totals():
     """Which is the point. A reader keying on presence is reading the data."""
     skewed = len(_app(SKEWED).stage(GROUPING_STAGE).totals)
     balanced = len(_app(BALANCED).stage(GROUPING_STAGE).totals)
     assert (skewed, balanced) == (37, 35), (skewed, balanced)
-
 
 def check_a_repeated_total_name_is_refused_rather_than_answered():
     """`number of output rows` is in there twice under two ids, in both logs."""
@@ -231,19 +207,16 @@ def check_a_repeated_total_name_is_refused_rather_than_answered():
         else:
             raise AssertionError("a name appearing twice answered with one value")
 
-
 def check_a_total_name_that_appears_once_still_answers():
     """Otherwise the refusal above could be refusing everything."""
     stage = _app(SKEWED).stage(GROUPING_STAGE)
     assert stage.reported_total("internal.metrics.executorRunTime") == 4560, stage.totals
-
 
 def check_a_total_value_is_not_always_a_number():
     stage = _app(SKEWED).stage(GROUPING_STAGE)
     rows = [total for total in stage.totals if total.name == "number of output rows"]
     assert [total.value for total in rows] == ["200", "200"], rows
     assert len({total.acc_id for total in rows}) == 2, rows
-
 
 def check_the_stage_peak_memory_total_is_a_sum_of_peaks_and_not_a_peak():
     """The measured reason `Stage.peak_memory` reads the tasks instead."""
@@ -252,7 +225,6 @@ def check_the_stage_peak_memory_total_is_a_sum_of_peaks_and_not_a_peak():
     assert stage.peak_memory == 377486768, stage.peak_memory
     assert stage.reported_total(PEAK) == 562035856, stage.reported_total(PEAK)
     assert stage.peak_memory < stage.reported_total(PEAK), stage.peak_memory
-
 
 def check_the_summed_peak_ranks_the_job_that_did_not_spill_as_the_worse_one():
     """Which is the whole argument for not using it."""
@@ -265,14 +237,12 @@ def check_the_summed_peak_ranks_the_job_that_did_not_spill_as_the_worse_one():
     assert balanced.total("memory_spilled") == 0, balanced.total("memory_spilled")
     assert skewed.total("memory_spilled") == 620755808, skewed.total("memory_spilled")
 
-
 def check_the_records_read_the_two_jobs_did_are_the_same():
     """The jobs differ in the key expression. They do not differ in how much they move."""
     skewed = _app(SKEWED).stage(GROUPING_STAGE)
     balanced = _app(BALANCED).stage(GROUPING_STAGE)
     assert skewed.total("records_read") == balanced.total("records_read") == 8000000, (
         skewed.total("records_read"), balanced.total("records_read"))
-
 
 def check_the_records_are_a_stage_apart_from_the_bytes():
     stage = _app(SKEWED).stage(1)
@@ -281,13 +251,11 @@ def check_the_records_are_a_stage_apart_from_the_bytes():
     assert stage.total("remote_bytes_read") == 0, stage.total("remote_bytes_read")
     assert stage.total("local_bytes_read") == 42048255, stage.total("local_bytes_read")
 
-
 def check_the_records_are_the_records_the_profiler_needs_for_a_partition_count():
     """Shuffle volume and cores are the two halves of a partition recommendation."""
     app = _app(SKEWED)
     assert app.cores == 2, app.cores
     assert app.stage(1).total("bytes_written") > 0, app.stage(1)
-
 
 def check_the_records_of_a_failed_task_are_marked_as_such():
     """No fixture has one, so this is built rather than read."""
@@ -300,7 +268,6 @@ def check_the_records_of_a_failed_task_are_marked_as_such():
         {"Event": "SparkListenerApplicationStart", "App ID": "x", "Timestamp": 1},
         _task_event(failed=False),
     ]).stage(7).tasks[0].failed is False
-
 
 def _task_event(failed):
     zero = {"Total Records Read": 0, "Local Bytes Read": 0, "Remote Bytes Read": 0}
@@ -316,12 +283,10 @@ def _task_event(failed):
                                                    "Shuffle Bytes Written": 0}},
     }
 
-
 def check_a_stage_wall_time_is_the_submission_subtracted_from_the_completion():
     stage = _app(SKEWED).stage(GROUPING_STAGE)
     assert stage.wall_time == stage.completion_time - stage.submission_time, stage
     assert stage.wall_time == 3879, stage.wall_time
-
 
 def check_a_stage_seen_only_through_its_task_events_declares_no_tasks():
     """The submitted event is where the planned count lives and this log has none."""
@@ -334,7 +299,6 @@ def check_a_stage_seen_only_through_its_task_events_declares_no_tasks():
     assert len(stage.tasks) == 1, stage.tasks
     assert stage.totals == (), stage.totals
 
-
 def check_a_task_that_does_not_say_whether_it_failed_did_not():
     """Spark writes the flag. A log that leaves it out should not invent a failure."""
     event = _task_event(failed=False)
@@ -344,7 +308,6 @@ def check_a_task_that_does_not_say_whether_it_failed_did_not():
         event,
     ])
     assert app.stage(7).tasks[0].failed is False, app.stage(7).tasks[0]
-
 
 def check_an_executor_that_reports_no_core_count_adds_none():
     app = model.build([
@@ -364,14 +327,12 @@ def check_an_executor_that_reports_no_core_count_adds_none():
     ])
     assert with_cores.cores == 8, with_cores.cores
 
-
 def check_a_task_with_no_partition_id_falls_back_to_its_index():
     app = model.build([
         {"Event": "SparkListenerApplicationStart", "App ID": "x", "Timestamp": 1},
         _task_event(failed=False),
     ])
     assert app.stage(7).tasks[0].partition == 0, app.stage(7).tasks[0]
-
 
 def check_the_records_of_the_model_cannot_be_written_to():
     app = _app(SKEWED)
@@ -384,7 +345,6 @@ def check_the_records_of_the_model_cannot_be_written_to():
         except dataclasses.FrozenInstanceError:
             continue
         raise AssertionError("{} let {} be written to".format(type(record).__name__, name))
-
 
 def check_a_stage_submitted_but_never_completed_still_builds():
     """A log from a job that died mid stage is a real thing to be handed."""
@@ -405,8 +365,7 @@ def check_a_stage_submitted_but_never_completed_still_builds():
     finally:
         shutil.rmtree(root)
 
-
-# --- the kinds declared on the task record ---
+# the kinds declared on the task record
 
 def check_every_task_field_declares_a_kind():
     """The check that makes the declaration a single place rather than a habit.
@@ -418,13 +377,11 @@ def check_every_task_field_declares_a_kind():
         assert "kind" in entry.metadata, entry.name
         assert entry.metadata["kind"] in model.KINDS, (entry.name, entry.metadata)
 
-
 def check_every_kind_is_used_by_something():
     """A kind nothing declares is a category that was imagined rather than found."""
     declared = {entry.metadata["kind"] for entry in dataclasses.fields(model.Task)}
     declared.update(model.DERIVED.values())
     assert declared == set(model.KINDS), declared
-
 
 def check_every_numeric_property_of_a_task_is_a_declared_derived_quantity():
     """A property cannot carry field metadata, so this is what keeps DERIVED honest.
@@ -440,7 +397,6 @@ def check_every_numeric_property_of_a_task_is_a_declared_derived_quantity():
             assert name in model.DERIVED, name
             assert model.DERIVED[name] in model.KINDS, name
 
-
 def check_quantities_holds_every_measured_field_and_nothing_else():
     measured = [entry.name for entry in dataclasses.fields(model.Task)
                 if entry.metadata["kind"] in model.MEASURED]
@@ -450,13 +406,11 @@ def check_quantities_holds_every_measured_field_and_nothing_else():
                  "finish_time", "failed"):
         assert name not in model.QUANTITIES, name
 
-
 def check_the_order_of_quantities_is_the_order_the_record_declares():
     """So a report's rows do not move when somebody sorts something."""
     measured = [entry.name for entry in dataclasses.fields(model.Task)
                 if entry.metadata["kind"] in model.MEASURED]
     assert list(model.QUANTITIES[:len(measured)]) == measured, model.QUANTITIES
-
 
 def check_kind_of_answers_for_a_field_and_for_a_derived_value():
     assert model.kind_of("memory_spilled") == model.BYTES
@@ -468,7 +422,6 @@ def check_kind_of_answers_for_a_field_and_for_a_derived_value():
     assert model.kind_of("duration") == model.MILLIS
     assert model.kind_of("outside_run_time") == model.MILLIS
 
-
 def check_kind_of_refuses_a_name_the_record_does_not_declare():
     """Rather than guessing, because a caller asking is about to treat it as a number."""
     try:
@@ -477,7 +430,6 @@ def check_kind_of_refuses_a_name_the_record_does_not_declare():
         assert "not a task quantity" in str(problem), problem
         return
     raise AssertionError("an undeclared name was given a kind")
-
 
 def check_a_measured_kind_is_not_an_identity_or_an_instant():
     assert model.IDENTITY not in model.MEASURED

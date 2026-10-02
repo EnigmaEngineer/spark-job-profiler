@@ -17,16 +17,13 @@ BALANCED_DIR = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
 GROUPING_STAGE = 2
 READ_STAGE = 0
 
-
 def _only_log(directory):
     names = [n for n in sorted(os.listdir(directory)) if not n.endswith(".md")]
     assert len(names) == 1, names
     return os.path.join(directory, names[0])
 
-
 def _app(directory):
     return eventlog.profile(_only_log(directory))
-
 
 def _stage(memory_values, disk_values, peaks=None, stage_id=3):
     """A stage whose tasks carry only the spill and peak numbers named."""
@@ -43,8 +40,7 @@ def _stage(memory_values, disk_values, peaks=None, stage_id=3):
                        declared_tasks=len(tasks), parent_ids=(), submission_time=0,
                        completion_time=0, failure=None, totals=(), tasks=tuple(tasks))
 
-
-# --- the control spills, which is the finding the rest of this module is arranged around ---
+# the control spills, which is the finding the rest of this module is arranged around
 
 def check_the_healthy_log_spills_the_same_bytes_as_the_pathological_one():
     """Stage 0 of both logs is identical to the byte, so a spill is not the pathology.
@@ -61,7 +57,6 @@ def check_the_healthy_log_spills_the_same_bytes_as_the_pathological_one():
     assert memory.examine(guilty).spilling
     assert memory.examine(clean).spilling
 
-
 def check_concentration_is_what_separates_the_two_jobs_and_not_the_spill():
     reports = {r.stage_id: r for r in memory.scan(_app(SKEWED_DIR))}
     clean = {r.stage_id: r for r in memory.scan(_app(BALANCED_DIR))}
@@ -70,15 +65,13 @@ def check_concentration_is_what_separates_the_two_jobs_and_not_the_spill():
     assert reports[GROUPING_STAGE].concentration == 1.0, reports[GROUPING_STAGE]
     assert clean[GROUPING_STAGE].concentration is None, clean[GROUPING_STAGE]
 
-
 def check_one_task_of_eight_spilled_all_of_it():
     report = memory.examine(_app(SKEWED_DIR).stage(GROUPING_STAGE))
     assert report.tasks == 8 and report.tasks_spilling == 1, report
     assert report.memory_bytes == 620755808, report
     assert "1 of 8 tasks spilled all 620755808 bytes" in report.why, report.why
 
-
-# --- the two spill numbers are one event ---
+# the two spill numbers are one event
 
 def check_the_two_spill_numbers_are_the_same_bytes_and_are_never_added():
     """The sum is a number describing nothing, and here is what it would have said."""
@@ -88,7 +81,6 @@ def check_the_two_spill_numbers_are_the_same_bytes_and_are_never_added():
     assert real == 620755808, real
     assert added == 708844603, added
     assert added > real
-
 
 def check_the_factor_between_them_is_not_a_constant():
     """So there is nothing to convert one into the other with.
@@ -105,15 +97,12 @@ def check_the_factor_between_them_is_not_a_constant():
     balanced = memory.inflation(_app(BALANCED_DIR).stage(READ_STAGE))
     assert balanced == read, (balanced, read)
 
-
 def check_a_stage_that_reached_no_disk_has_no_factor():
     assert memory.inflation(_stage([5, 5], [0, 0])) is None
     assert memory.inflation(_stage([0, 0], [0, 0])) is None
 
-
 def check_a_stage_that_spilled_nothing_has_no_concentration():
     assert memory.concentration(_stage([0, 0], [0, 0])) is None
-
 
 def check_an_even_spill_across_eight_tasks_reads_one_eighth():
     """The other end of the concentration range, which no committed stage reaches."""
@@ -121,8 +110,7 @@ def check_an_even_spill_across_eight_tasks_reads_one_eighth():
     assert memory.concentration(even) == 0.125, memory.concentration(even)
     assert memory.examine(even).why == "8 of 8 tasks spilled"
 
-
-# --- peak execution memory, and why it is not the pressure signal ---
+# peak execution memory, and why it is not the pressure signal
 
 def check_peak_memory_is_zero_on_the_stage_that_spilled_the_most_often():
     """Both tasks spilled 58,720,144 bytes each and both report a peak of zero.
@@ -136,12 +124,10 @@ def check_peak_memory_is_zero_on_the_stage_that_spilled_the_most_often():
         assert stage.values("peak_memory") == [0, 0], directory
         assert memory.peak_reported(stage) is False, directory
 
-
 def check_peak_memory_is_reported_on_the_grouping_stage_of_both_logs():
     """The one place it is present, so the check above is about the log and not the tool."""
     for directory in (SKEWED_DIR, BALANCED_DIR):
         assert memory.peak_reported(_app(directory).stage(GROUPING_STAGE)) is True, directory
-
 
 def check_the_higher_peak_belongs_to_the_job_that_did_not_spill():
     """So peak execution memory does not order two jobs by whether they spill.
@@ -161,8 +147,7 @@ def check_the_higher_peak_belongs_to_the_job_that_did_not_spill():
     assert clean.peak_memory > max(quiet) * 4, (clean.peak_memory, max(quiet))
     assert clean.total("memory_spilled") == 0
 
-
-# --- the budget the log does not hold ---
+# the budget the log does not hold
 
 def check_neither_log_records_the_memory_a_task_had():
     for directory in (SKEWED_DIR, BALANCED_DIR):
@@ -171,7 +156,6 @@ def check_neither_log_records_the_memory_a_task_had():
         assert money.absent == memory.BUDGET_PROPERTIES, money.absent
         assert money.recorded == {}, money.recorded
 
-
 def check_the_budget_is_known_when_every_property_is_there():
     """The other side of the refusal, so the refusal is about the input."""
     money = memory.budget({name: "1g" for name in memory.BUDGET_PROPERTIES})
@@ -179,14 +163,12 @@ def check_the_budget_is_known_when_every_property_is_there():
     assert money.absent == (), money
     assert set(money.recorded) == set(memory.BUDGET_PROPERTIES), money
 
-
 def check_one_missing_property_is_enough_to_refuse():
     partial = {name: "1g" for name in memory.BUDGET_PROPERTIES[1:]}
     money = memory.budget(partial)
     assert money.known is False, money
     assert money.absent == (memory.BUDGET_PROPERTIES[0],), money.absent
     assert len(money.recorded) == len(memory.BUDGET_PROPERTIES) - 1, money.recorded
-
 
 def check_the_driver_memory_the_log_does_record_is_not_taken_as_the_budget():
     """Both logs set spark.driver.memory and it is not on the list on purpose.
@@ -199,7 +181,6 @@ def check_the_driver_memory_the_log_does_record_is_not_taken_as_the_budget():
         assert properties["spark.driver.memory"] == "1g", directory
         assert "spark.driver.memory" not in memory.BUDGET_PROPERTIES
 
-
 def check_the_report_puts_the_missing_budget_before_any_number():
     """A reader who learns it at the bottom has already read the numbers as absolute."""
     lines = memory.pressure_lines(_app(SKEWED_DIR))
@@ -209,16 +190,12 @@ def check_the_report_puts_the_missing_budget_before_any_number():
     first_number = next(i for i, line in enumerate(lines) if "117440288" in line)
     assert first_number > 0, lines
 
-
 def check_the_report_names_a_known_budget_rather_than_staying_silent():
     app = dataclasses.replace(
         _app(SKEWED_DIR),
         properties={name: "1g" for name in memory.BUDGET_PROPERTIES})
     lines = memory.pressure_lines(app)
     assert lines[0].startswith("execution memory budget readable from"), lines[0]
-
-
-# --- the records ---
 
 def check_a_spill_report_cannot_be_edited_after_it_is_made():
     report = memory.examine(_app(SKEWED_DIR).stage(GROUPING_STAGE))
@@ -229,21 +206,18 @@ def check_a_spill_report_cannot_be_edited_after_it_is_made():
             continue
         raise AssertionError("{} could be written to".format(field))
 
-
 def check_every_outcome_is_one_of_the_two():
     for directory in (SKEWED_DIR, BALANCED_DIR):
         for report in memory.scan(_app(directory)):
             assert report.outcome in memory.OUTCOMES, report
             assert report.spilling == (report.outcome == memory.SPILLING), report
 
-
 def check_scan_covers_every_stage_in_order():
     app = _app(SKEWED_DIR)
     reports = memory.scan(app)
     assert [r.stage_id for r in reports] == [s.stage_id for s in app.stages], reports
 
-
-# --- the boundaries a mutation pass found unguarded ---
+# the boundaries a mutation pass found unguarded
 
 def check_a_budget_cannot_be_edited_after_it_is_made():
     money = memory.budget({})
@@ -253,7 +227,6 @@ def check_a_budget_cannot_be_edited_after_it_is_made():
         except dataclasses.FrozenInstanceError:
             continue
         raise AssertionError("{} could be written to".format(field))
-
 
 def check_a_stage_that_spilled_to_memory_but_not_to_disk_is_still_spilling():
     """Clean means both columns are zero. Either one moving is a spill.
@@ -267,7 +240,6 @@ def check_a_stage_that_spilled_to_memory_but_not_to_disk_is_still_spilling():
     assert disk_only.outcome == memory.SPILLING, disk_only
     assert memory.examine(_stage([0, 0], [0, 0])).outcome == memory.CLEAN
 
-
 def check_one_task_of_two_spilling_still_reads_as_all_of_it():
     """The smallest stage the concentrated wording applies to.
 
@@ -279,7 +251,6 @@ def check_one_task_of_two_spilling_still_reads_as_all_of_it():
     assert report.why == "1 of 2 tasks spilled all 7 bytes of it", report.why
     assert report.concentration == 1.0, report
 
-
 def check_a_single_task_stage_is_not_described_as_concentrated():
     """One task cannot concentrate anything, so the wording has to change.
 
@@ -290,7 +261,6 @@ def check_a_single_task_stage_is_not_described_as_concentrated():
     assert report.tasks == 1 and report.tasks_spilling == 1, report
     assert report.why == "1 of 1 tasks spilled", report.why
     assert "all 7 bytes" not in report.why, report.why
-
 
 def check_a_peak_of_one_byte_counts_as_reported():
     """Above zero is the test, because zero is what Spark writes when it tracked nothing."""
