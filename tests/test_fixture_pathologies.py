@@ -28,6 +28,23 @@ BALANCED_RECORDS = {0: (0, 0), 1: (1000000, 1000000), 2: (984924.5, 1206030)}
 FIRST_STAGE_SPILL = (117440288, 61304287)
 GROUPING_STAGE = 2
 
+# The two cycle 2 fixtures, captured 2026-10-02. Neither carries a pathology in the query.
+# Each carries one the profiler's own output has.
+#
+# `wide` is 48 stages, and 48 times the 14 metric default set is the 672 verdicts the scan
+# produces. The line count is those plus the header, the tally and one worst line per unit.
+# Pinned because the whole reason the fixture exists is the size of that number.
+WIDE_STAGES = 48
+WIDE_VERDICTS = 672
+WIDE_LINES = 675
+
+# `small` at 600 rows. These two came off the deterministic half of the log and reproduced
+# across two separate captures to the record and to the byte, which is why they can be
+# pinned at all. The millis metrics moved between those captures and are not pinned here.
+SMALL_GROUPING_STAGE = 2
+SMALL_RECORDS = (12.0, 518)
+SMALL_LOCAL_BYTES = (793.0, 7449)
+
 
 def _app(job):
     return eventlog.profile(fixture_probe.only_log(os.path.join(FIXTURES, job)))
@@ -204,3 +221,58 @@ def check_the_probe_reports_a_disagreement_it_is_given():
 def model_disagreements(stage):
     from sjp import model
     return model.disagreements(stage)
+
+
+def check_the_wide_fixture_still_carries_the_stage_count_it_was_captured_for():
+    """The fixture is the measurement. If somebody recaptures it with fewer steps the
+    output problem it exists to show goes away and nothing here would notice."""
+    app = _app("wide")
+    assert len(app.stages) == WIDE_STAGES, len(app.stages)
+
+
+def check_the_wide_fixture_produces_an_unreadable_number_of_lines():
+    """This is `ot-095` as a check rather than as an argument.
+
+    The five cycle 1 logs all print between 45 and 61 lines, which fits on a screen. This
+    one prints 675 for a job where nothing is skewed at all. The useful content is the
+    tally and the worst line per unit, and both sit at the very bottom.
+    """
+    from sjp import commands, skew
+
+    app = _app("wide")
+    verdicts = skew.scan(app)
+    assert len(verdicts) == WIDE_VERDICTS, len(verdicts)
+    lines = commands.skew_lines(app, verdicts, skew.DEFAULT_THRESHOLD)
+    assert len(lines) == WIDE_LINES, len(lines)
+    # The thing that makes it unreadable is not the length on its own. It is that the
+    # summary is last, so a reader scrolls past 672 lines to reach the three that answer
+    # the question they asked.
+    assert "skewed," in lines[-2], lines[-2]
+
+
+def check_the_small_fixture_reports_byte_and_record_skew_nobody_would_act_on():
+    """This is the `ot-093` evidence. `skew.FLOORS` leaves bytes and counts at None, and
+    None means no floor, so these two are reported skewed on a few kilobytes.
+
+    Neither of these is a bug in the arithmetic. 7,449 bytes really is 9.4 times 793. The
+    point is that the verdict is true and useless, and until this fixture existed there was
+    no log in the repo where the small end of the byte and count ranges was populated.
+    """
+    stage = _app("small").stage(SMALL_GROUPING_STAGE)
+    assert (stage.median("records_read"), stage.largest("records_read")) == SMALL_RECORDS
+    got = (stage.median("local_bytes_read"), stage.largest("local_bytes_read"))
+    assert got == SMALL_LOCAL_BYTES, got
+
+
+def check_the_small_fixture_byte_skew_is_below_anything_the_cycle_one_logs_carry():
+    """The floors cannot be placed from one end of a range.
+
+    The skewed join's key exchange writes 88,788,038 bytes. This stage's largest task reads
+    7,449. Four orders of magnitude between them, in the same repo, judged by the same rule
+    with no floor in it.
+    """
+    small = _app("small").stage(SMALL_GROUPING_STAGE).largest("local_bytes_read")
+    assert small < 10_000, small
+    skewed = _app("skewed").stage(GROUPING_STAGE).largest("local_bytes_read")
+    assert skewed > 1_000_000, skewed
+    assert skewed / small > 1_000, skewed / small
