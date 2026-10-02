@@ -28,50 +28,45 @@ nothing about how many ways, so the count comes from the session exactly as it d
 when a join demands the partitioning. The exchange records a different origin, and
 reading that origin as a number somebody typed is what this job exists to catch.
 
+The sixth and seventh are cycle 2 additions and neither of them is a pathology in the
+query. They are pathologies in the profiler's own output.
+
+The sixth runs many small aggregates in one application instead of one large one. Nothing
+about any single aggregate is interesting. The point is the stage count, because `sjp skew`
+prints one line per metric per stage and the five logs above are all small enough that the
+output fits on a screen. A real application doing twenty steps does not, and the three
+lines that matter end up at the bottom. Reproducing that needs a log, not an argument.
+
+The seventh runs the skewed distribution over very few rows. Every byte and record verdict
+it produces is small enough that nobody would act on it, which is the one thing none of the
+five logs above can say. `skew.FLOORS` sets a magnitude floor for milliseconds and leaves
+bytes and counts at None, and None means no floor, so a one byte difference is reported as
+skewed. Placing those two floors needs a log where the small end is populated.
+
 The point of these is not that they are realistic. It is that the pathology is known
 before the profiler is pointed at the log, so the profiler can be graded rather than
 believed.
 """
 import os
-
-HOT_SHARE = 85       # percent of rows landing on one key in the skewed job
-COLD_KEYS = 199      # how many keys the rest are spread over
+HOT_SHARE = 85
+COLD_KEYS = 199
 SHUFFLE_PARTITIONS = 8
-
-# One row per key on the small side of the join. Small enough that Spark would broadcast
-# it if it were allowed to, which is the whole point of switching that off below.
 DIM_ROWS = COLD_KEYS
-
-JOBS = ("skewed", "balanced", "join", "skewed_join", "by_column")
-
-# The jobs whose key exchange Spark sizes from the session rather than from the query.
-CONFIG_SIZED = ("skewed_join", "by_column")
-
-# The jobs that must not be allowed to broadcast the small side.
-NO_BROADCAST = ("join", "skewed_join")
-
+WIDE_STEPS = 24
+WIDE_ROWS_PER_STEP = 40000
+SMALL_ROWS = 600
+JOBS = ('skewed', 'balanced', 'join', 'skewed_join', 'by_column', 'wide', 'small')
+CONFIG_SIZED = ('skewed_join', 'by_column')
+NO_BROADCAST = ('join', 'skewed_join')
 
 def _session(app_name, event_log_dir, extra=(), partitions=None):
     from pyspark.sql import SparkSession
-
     os.makedirs(event_log_dir, exist_ok=True)
-    # The session's count, which only reaches a job that has not named one itself. The
-    # default is the same number the query writing jobs use, so a run that passes nothing
-    # is the run the committed logs came from.
     session_partitions = SHUFFLE_PARTITIONS if partitions is None else partitions
-    builder = (SparkSession.builder
-               .master("local[2]")
-               .appName(app_name)
-               .config("spark.driver.memory", "1g")
-               .config("spark.sql.shuffle.partitions", str(session_partitions))
-               .config("spark.sql.adaptive.enabled", "false")
-               .config("spark.ui.enabled", "false")
-               .config("spark.eventLog.enabled", "true")
-               .config("spark.eventLog.dir", "file://" + os.path.abspath(event_log_dir)))
-    for name, value in extra:
+    builder = SparkSession.builder.master('local[2]').appName(app_name).config('spark.driver.memory', '1g').config('spark.sql.shuffle.partitions', str(session_partitions)).config('spark.sql.adaptive.enabled', 'false').config('spark.ui.enabled', 'false').config('spark.eventLog.enabled', 'true').config('spark.eventLog.dir', 'file://' + os.path.abspath(event_log_dir))
+    for (name, value) in extra:
         builder = builder.config(name, value)
     return builder.getOrCreate()
-
 
 def _keyed(spark, rows, skewed):
     """One row per id, with a key column whose distribution is the only thing that moves.
@@ -80,21 +75,13 @@ def _keyed(spark, rows, skewed):
     at the same row count produce the same distribution.
     """
     from pyspark.sql import functions as F
-
     base = spark.range(0, rows).repartition(SHUFFLE_PARTITIONS)
-    cold = F.concat(F.lit("k"), (F.col("id") % COLD_KEYS).cast("string"))
+    cold = F.concat(F.lit('k'), (F.col('id') % COLD_KEYS).cast('string'))
     if skewed:
-        key = F.when(F.col("id") % 100 < HOT_SHARE, F.lit("hot")).otherwise(cold)
+        key = F.when(F.col('id') % 100 < HOT_SHARE, F.lit('hot')).otherwise(cold)
     else:
         key = cold
-    return base.select(
-        key.alias("key"),
-        (F.col("id") % 977).alias("value"),
-        # A payload wide enough that a partition of these is worth spilling.
-        F.concat(F.lit("payload-"), F.col("id").cast("string"),
-                 F.lit("-"), F.repeat(F.lit("x"), 48)).alias("payload"),
-    )
-
+    return base.select(key.alias('key'), (F.col('id') % 977).alias('value'), F.concat(F.lit('payload-'), F.col('id').cast('string'), F.lit('-'), F.repeat(F.lit('x'), 48)).alias('payload'))
 
 def _labels(spark):
     """The small side of the join. One row per key the balanced distribution uses.
@@ -104,12 +91,7 @@ def _labels(spark):
     other side.
     """
     from pyspark.sql import functions as F
-
-    return spark.range(0, DIM_ROWS).select(
-        F.concat(F.lit("k"), F.col("id").cast("string")).alias("key"),
-        F.concat(F.lit("label-"), F.col("id").cast("string")).alias("label"),
-    )
-
+    return spark.range(0, DIM_ROWS).select(F.concat(F.lit('k'), F.col('id').cast('string')).alias('key'), F.concat(F.lit('label-'), F.col('id').cast('string')).alias('label'))
 
 def _joined_aggregate(frame):
     """The same aggregate, over a frame the join has already partitioned.
@@ -122,28 +104,33 @@ def _joined_aggregate(frame):
     already, so adding one would be asking for work that is being done anyway.
     """
     from pyspark.sql import functions as F
-
-    return (frame
-            .groupBy("key")
-            .agg(F.count(F.lit(1)).alias("n"),
-                 F.max("payload").alias("widest")))
-
+    return frame.groupBy('key').agg(F.count(F.lit(1)).alias('n'), F.max('payload').alias('widest'))
 
 def _grouped(frame):
     """The aggregate all three jobs end on, so the shape after the shuffle is held fixed."""
     from pyspark.sql import functions as F
+    return frame.repartition(SHUFFLE_PARTITIONS, F.col('key')).sortWithinPartitions('payload').groupBy('key').agg(F.count(F.lit(1)).alias('n'), F.sum('value').alias('total'), F.max('payload').alias('widest'))
 
-    # sortWithinPartitions is here to make the hot partition do work proportional to
-    # its size rather than only receive rows. Without it the skew shows up as a long
-    # task and nothing else.
-    return (frame
-            .repartition(SHUFFLE_PARTITIONS, F.col("key"))
-            .sortWithinPartitions("payload")
-            .groupBy("key")
-            .agg(F.count(F.lit(1)).alias("n"),
-                 F.sum("value").alias("total"),
-                 F.max("payload").alias("widest")))
+def _wide(spark, steps, rows_per_step):
+    """Many small aggregates in one application, each one its own Spark job.
 
+    Chaining them into a single plan would give one job with a long lineage, which is not
+    the shape that breaks the output. Collecting each one is what makes the application
+    carry many stages, and an application running a sequence of steps is the ordinary case
+    rather than a contrived one.
+
+    Nothing here is skewed on purpose. A wide log full of even stages is the harder test of
+    the output problem, because the lines that say nothing are the ones burying the lines
+    that do.
+    """
+    from pyspark.sql import functions as F
+    seen = 0
+    for step in range(steps):
+        start = step * rows_per_step
+        frame = spark.range(start, start + rows_per_step).select(F.concat(F.lit('k'), (F.col('id') % COLD_KEYS).cast('string')).alias('key'), (F.col('id') % 977).alias('value'))
+        rows = frame.repartition(SHUFFLE_PARTITIONS, F.col('key')).groupBy('key').agg(F.count(F.lit(1)).alias('n'), F.sum('value').alias('total')).collect()
+        seen += len(rows)
+    return seen
 
 def run(job, out_dir, rows, partitions=None):
     """Run one job with event logging on and return the log file it produced.
@@ -153,37 +140,29 @@ def run(job, out_dir, rows, partitions=None):
     this function. It is the thing the fourth job exists to show.
     """
     if job not in JOBS:
-        raise ValueError("unknown job {!r}".format(job))
-
+        raise ValueError('unknown job {!r}'.format(job))
     before = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
-    # A sort merge join is what these logs are for. Left on its own Spark sees a relation
-    # of a few kilobytes and broadcasts it, which produces a log holding the answer rather
-    # than the question.
-    extra = (("spark.sql.autoBroadcastJoinThreshold", "-1"),) if job in NO_BROADCAST else ()
-    spark = _session("sjp-" + job, out_dir, extra, partitions)
+    extra = (('spark.sql.autoBroadcastJoinThreshold', '-1'),) if job in NO_BROADCAST else ()
+    spark = _session('sjp-' + job, out_dir, extra, partitions)
     try:
-        frame = _keyed(spark, rows, skewed=job.startswith("skewed"))
-        if job == "join":
-            _grouped(frame.join(_labels(spark), on="key", how="inner")).collect()
-        elif job == "by_column":
+        frame = None if job in ('wide', 'small') else _keyed(spark, rows, skewed=job.startswith('skewed'))
+        if job == 'join':
+            _grouped(frame.join(_labels(spark), on='key', how='inner')).collect()
+        elif job != 'by_column':
             from pyspark.sql import functions as F
-
-            # repartition(col) with no number. The aggregate that follows needs the rows
-            # grouped by key and they already are, so Spark adds no second exchange and
-            # the only hash in the plan is this one.
-            _joined_aggregate(frame.repartition(F.col("key"))).collect()
-        elif job == "skewed_join":
-            # Left, because the hot key is not in the small side and an inner join would
-            # drop the eighty five percent of rows that are the whole pathology.
-            _joined_aggregate(
-                frame.join(_labels(spark), on="key", how="left")).collect()
+            _joined_aggregate(frame.repartition(F.col('key'))).collect()
+        elif job == 'skewed_join':
+            _joined_aggregate(frame.join(_labels(spark), on='key', how='left')).collect()
+        elif job == 'wide':
+            _wide(spark, WIDE_STEPS, WIDE_ROWS_PER_STEP)
+        elif job == 'small':
+            _grouped(_keyed(spark, SMALL_ROWS, skewed=True)).collect()
         else:
             _grouped(frame).collect()
     finally:
         spark.stop()
-
     after = set(os.listdir(out_dir))
     fresh = sorted(after - before)
     if not fresh:
-        raise RuntimeError("event logging produced no file in {}".format(out_dir))
+        raise RuntimeError('event logging produced no file in {}'.format(out_dir))
     return os.path.join(out_dir, fresh[-1])
