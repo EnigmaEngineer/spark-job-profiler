@@ -1,6 +1,6 @@
 # Where these came from
 
-Six real event logs, unedited. All were produced on this machine by
+Eight real event logs, unedited. All were produced on this machine by
 
 ```
 python -m sjp capture --job skewed      --out <dir> --rows 8000000
@@ -9,7 +9,14 @@ python -m sjp capture --job join        --out <dir> --rows 8000000
 python -m sjp capture --job skewed_join --out <dir> --rows 8000000
 python -m sjp capture --job by_column   --out <dir> --rows 8000000
 python -m sjp capture --job by_column   --out <dir> --rows 8000000 --partitions 5
+python -m sjp capture --job wide        --out <dir> --rows 0
+python -m sjp capture --job small       --out <dir> --rows 0
 ```
+
+The last two were captured 2026-10-02 and they are a different kind of fixture. The first six
+carry a pathology in the query. These two carry one in the profiler's own output, so `--rows`
+does nothing on either. `wide` takes its size from `WIDE_STEPS` and `WIDE_ROWS_PER_STEP`, and
+`small` from `SMALL_ROWS`.
 
 running pyspark 3.5.6. The session was `local[2]` with a 1g driver and 8 shuffle
 partitions, except for the one log the command above asks for 5. Adaptive execution was off
@@ -46,3 +53,31 @@ something other than real logs.
 A stage id is not stable across two runs of the join job. Its plan is not a straight line,
 the two sides are submitted together, and whichever is scheduled first takes the lower id.
 Address a stage by something the log guarantees rather than by its number.
+
+## The two cycle 2 logs, and why a row count would not have produced them
+
+`wide` runs 24 small aggregates in one application rather than one large one, so the
+application carries **48 stages**. Chaining them into a single plan would have given one job
+with a long lineage, which is not the shape that breaks anything. Collecting each step is what
+makes the stage count grow, and an application that runs a sequence of steps is the ordinary
+case rather than a contrived one.
+
+Nothing in it is skewed. That is deliberate. `sjp skew` prints one line per metric per stage,
+and 48 stages against the 14 metric default set is 672 verdicts and **675 lines of output to
+say that nothing is wrong**. The tally and the worst line per unit are the last four. The six
+logs above print between 45 and 61 lines, which is why five weeks of work on this tool never
+ran into it.
+
+`small` is the skewed distribution over **600 rows**. Its grouping stage reports
+`records_read` skewed at 43.17, a largest task of 518 records against a median of 12. It also
+reports `local_bytes_read` skewed at 9.39, which is 7,449 bytes against 793. Both verdicts are
+arithmetically correct and neither is worth acting on. `skew.FLOORS` carries a millisecond
+floor of 50 and leaves bytes and counts at `None`, and `None` means no floor.
+
+It exists because a floor cannot be placed from one end of a range. The skewed join's key
+exchange writes 88,788,038 bytes. This stage's largest task reads 7,449. Four orders of
+magnitude apart, in the same repo, judged by the same rule with nothing in it.
+
+Both numbers above came off the deterministic half of the log and reproduced across two
+separate captures, to the record and to the byte. The millisecond metrics moved between those
+two captures, so nothing pins them.
