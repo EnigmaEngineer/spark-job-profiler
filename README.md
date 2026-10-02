@@ -83,7 +83,9 @@ tests/fixtures/     six real event logs, unedited
 
 ## The sample jobs
 
-Five jobs over 8,000,000 rows. Same payload in all of them. Adaptive execution off.
+Five jobs over 8,000,000 rows. Same payload in all of them. Adaptive execution off. Two more
+were added in cycle 2 and they are described further down, because neither of them carries a
+pathology in the query.
 
 The first two differ in one expression. One puts 85 percent of the rows on a single key.
 The other spreads them over 199.
@@ -908,6 +910,78 @@ exchange, the volume asks for a cut, and the stage the count feeds is even on ro
 than carrying a hot key. The cut is recommended rather than withheld. Without a log of this
 shape the guard could be withholding on every hash it sees and every check would still pass.
 
+## Two logs the tool could not read well, and what they cost it
+
+Added 2026-10-02. The five jobs above all carry something wrong with the query. These two
+carry something wrong with this tool.
+
+### 675 lines to say nothing is wrong
+
+`sjp skew` prints one line per metric per stage, then the tally, then the worst line per
+unit. On every log in this repo until now that was fine.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/*   | wc -l
+47
+$ python -m sjp skew tests/fixtures/eventlogs/wide/*     | wc -l
+675
+```
+
+The `wide` job runs 24 small aggregates in one application instead of one large one, which
+gives the application 48 stages. 48 stages times the 14 metric default set is 672 verdicts.
+The job is not skewed anywhere.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/wide/* | tail -2
+  0 skewed, 103 even, 569 undecided
+  nothing skewed at this threshold
+```
+
+Those two lines are the answer and they are lines 674 and 675. Everything above them is a
+stage that is fine on a metric nobody asked about.
+
+This was not a guess. The default metric set was widened from three to fourteen on
+2026-09-27 and the cost of that was recorded at the time as an open question, against logs
+of three stages where it did not show. The arithmetic is the whole story, which is why it
+took a log rather than an argument to make it land. At 900 stages the same rule prints
+12,600 lines.
+
+Nothing about the output changed today. The fixture is the deliverable, and four checks now
+pin the line count so a change to the output has to account for it.
+
+### A floor cannot be placed from one end of a range
+
+`skew.FLOORS` carries a millisecond floor of 50 and leaves bytes and counts at `None`.
+`None` means no floor, so a byte difference of any size is judged on its ratio alone.
+
+The `small` job runs the skewed distribution over 600 rows.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/small/* | grep -E '^ +skewed'
+  skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
+  skewed    stage 2  executor_run_time     4.8559  largest task 556 against a median of 114.5
+  skewed    stage 2  records_read         43.1667  largest task 518 against a median of 12
+  skewed    stage 2  local_bytes_read      9.3934  largest task 7449 against a median of 793
+```
+
+The last two are correct and useless. 7,449 bytes really is 9.4 times 793 bytes, and 518
+records really is 43 times 12. Neither is a thing anyone would act on.
+
+The millisecond floor was placed on evidence. The sweep `{0: 11, 30: 8, 50: 8, 100: 7,
+3041: 6}` is published further up this file, and 50 sits inside a gap where every value
+gives the same answer. The byte and count floors have no equivalent, because until today
+every log here measured bytes in the tens of millions. The skewed join's key exchange writes
+88,788,038 of them. This stage reads 7,449. Four orders of magnitude apart and judged by the
+same rule.
+
+The two figures above came off the deterministic half of the log and reproduced across two
+separate captures to the record and to the byte. The two `executor_run_time` lines did not,
+because they are timings, so nothing pins them.
+
+The floors are not set here. Setting a floor on the first log that ever populated the small
+end, on the same day that log was captured, is how the millisecond floor would have been
+placed badly.
+
 ## Running the checks
 
 ```
@@ -940,18 +1014,25 @@ sjp/contract.py: 6 mutation sites, running 0 to 6
 6 killed, 0 survived, 0 ungraded, 6 graded
 scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
 19 killed, 1 survived, 0 ungraded, 20 graded
-jobs/sample.py: 23 mutation sites, running 0 to 23
-2 killed, 21 survived, 0 ungraded, 23 graded
+jobs/sample.py: 35 mutation sites, running 0 to 35
+2 killed, 33 survived, 0 ungraded, 35 graded
 ```
 
 The last row is the honest one. Every surviving mutant in `jobs/sample.py` sits in code
 that only runs with a Spark session, and a check cannot have one. What grades that module
 is the three logs it produced, which is weaker than a mutant and is not nothing.
 
-That row has now got worse twice for the same reason. The join job added three sites and
-the skewed join added two more, all of them in the same unreachable place, so the
-denominator moves and the numerator does not. Saying so is the point. A score that only
-ever gets quoted when it improves is not a measurement.
+That row has now got worse three times for the same reason. The join job added three sites
+and the skewed join added two more. The two cycle 2 jobs added twelve, taking the
+denominator from 23 to 35 while the numerator stayed at 2. All of them sit in the same
+unreachable place. Saying so is the point. A score that only ever gets quoted when it
+improves is not a measurement.
+
+The twelve new ones are worth naming rather than lumping in. Ten are inside `_wide` and the
+dispatch for the two new jobs, which cannot run without a session. The other two are the
+`WIDE_STEPS` and `SMALL_ROWS` constants, and a mutant that moves either of them produces a
+different fixture rather than a wrong answer, so no check could catch one without
+regenerating a log.
 
 That row got worse on purpose. Two of its mutants used to die against checks that read the
 module's own constants back out of the module, which is transcription and would have gone
@@ -1009,6 +1090,15 @@ Editing them would make them something other than real logs.
 The model maps twelve accumulables onto a field it keeps per task. The grouping stage of
 the skewed job carries thirty seven. The other twenty five are not read, and nothing here
 argues that they are uninteresting.
+
+`sjp skew` prints every verdict with no ranking and no filter. On the eight committed logs
+that is between 45 and 675 lines. The summary is last, so the wider the log the further a
+reader scrolls to reach it. The `wide` fixture exists to hold that number still while it is
+fixed.
+
+The byte and count floors in `skew.FLOORS` are `None`, which means no floor. The `small`
+fixture populates the small end of both ranges and is the evidence those floors have been
+missing. It does not place them.
 
 The model keeps every task of every stage. Both committed logs hold eighteen tasks. What
 this costs on a log from a job with a million tasks has not been measured, so nothing here
