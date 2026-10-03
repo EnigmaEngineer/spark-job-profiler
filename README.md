@@ -246,22 +246,22 @@ numbers and the two other traps in that list.
 python -m sjp skew tests/fixtures/eventlogs/skewed/* \
       --metric records_read --metric duration --metric memory_spilled --metric serialize_time
 local-1790267120237  sjp-skewed  threshold 4.0  12 verdicts
-  undecided stage 0  records_read        no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  undecided stage 0  duration            no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  undecided stage 0  memory_spilled      no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
-  even      stage 1  records_read          1.0000  largest task 1000000 against a median of 1000000
-  even      stage 1  duration              1.7378  largest task 855 against a median of 492
-  undecided stage 1  memory_spilled      no ratio  every task reads zero, so there is no spread
-  undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
-  skewed    stage 2  records_read         44.2179  largest task 6932663 against a median of 156784
-  skewed    stage 2  duration             14.7246  largest task 3048 against a median of 207
-  skewed    stage 2  memory_spilled     unbounded  more than half the tasks read zero and one reads 620755808
-  undecided stage 2  serialize_time      no ratio  largest task 3 is under the millis floor of 50
-  3 skewed, 2 even, 7 undecided
   worst count   stage 2 on records_read at 44.2179
   worst bytes   stage 2 on memory_spilled at unbounded
   worst millis  stage 2 on duration at 14.7246
+  3 skewed, 2 even, 7 undecided
+  skewed    stage 2  records_read         44.2179  largest task 6932663 against a median of 156784
+  skewed    stage 2  memory_spilled     unbounded  more than half the tasks read zero and one reads 620755808
+  skewed    stage 2  duration             14.7246  largest task 3048 against a median of 207
+  even      stage 1  records_read          1.0000  largest task 1000000 against a median of 1000000
+  even      stage 1  duration              1.7378  largest task 855 against a median of 492
+  undecided stage 0  records_read        no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  memory_spilled      no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 1  memory_spilled      no ratio  every task reads zero, so there is no spread
+  undecided stage 0  duration            no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
+  undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
+  undecided stage 2  serialize_time      no ratio  largest task 3 is under the millis floor of 50
 ```
 
 Four metrics are named there to keep the block readable. The default is every quantity a
@@ -272,8 +272,8 @@ task carries, which is fourteen of them, and on this log that is 42 verdicts rea
 The same command on the balanced log, which differs from the skewed one in one expression.
 
 ```
-  0 skewed, 11 even, 31 undecided
   nothing skewed at this threshold
+  0 skewed, 11 even, 31 undecided
 ```
 
 It exits 1 when something skewed, so a shell can act on the answer.
@@ -363,14 +363,14 @@ metrics it reported a skewed stage.
 ```
 python -m sjp skew tests/fixtures/eventlogs/balanced/* --metric serialize_time
 local-1790267152313  sjp-balanced  threshold 4.0  3 verdicts
+  nothing skewed at this threshold
+  0 skewed, 0 even, 3 undecided
   undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
   undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
   undecided stage 2  serialize_time      no ratio  largest task 8 is under the millis floor of 50
-  0 skewed, 0 even, 3 undecided
-  nothing skewed at this threshold
 ```
 
-That third line was `skewed` with an unbounded ratio before the floor existed. Seven tasks
+The last of those three was `skewed` with an unbounded ratio before the floor existed. Seven tasks
 serialized their result in zero milliseconds and the eighth took 8. The zero median rule that
 the section above calls the most extreme skew a stage can reach cannot tell 8 milliseconds
 from 620,755,808 bytes, because a ratio carries no unit.
@@ -401,7 +401,8 @@ all of each, and the single answer was decided by which metric the scan reached 
 naming a 71 millisecond pause ahead of a 620,755,808 byte spill.
 
 There is no conversion between a millisecond and a byte, so the report gives one worst per
-unit and stops pretending otherwise.
+unit and stops pretending otherwise. Those lines sit at the top of the output as of
+2026-10-03 and the same argument is why the ranked body groups by unit before it sorts.
 
 ## What spilled, and what the log will not say about why
 
@@ -917,8 +918,8 @@ carry something wrong with this tool.
 
 ### 675 lines to say nothing is wrong
 
-`sjp skew` prints one line per metric per stage, then the tally, then the worst line per
-unit. On every log in this repo until now that was fine.
+`sjp skew` printed one line per metric per stage, then the tally, then the worst line per
+unit. On every log in this repo until the `wide` capture that was fine.
 
 ```
 $ python -m sjp skew tests/fixtures/eventlogs/skewed/*   | wc -l
@@ -932,13 +933,14 @@ gives the application 48 stages. 48 stages times the 14 metric default set is 67
 The job is not skewed anywhere.
 
 ```
-$ python -m sjp skew tests/fixtures/eventlogs/wide/* | tail -2
-  0 skewed, 103 even, 569 undecided
-  nothing skewed at this threshold
+python -m sjp skew tests/fixtures/eventlogs/wide/* | tail -2
+  undecided stage 47  outside_run_time    no ratio  largest task 24 is under the millis floor of 50
+  undecided stage 47  serialize_time      no ratio  every task reads zero, so there is no spread
 ```
 
-Those two lines are the answer and they are lines 674 and 675. Everything above them is a
-stage that is fine on a metric nobody asked about.
+Those used to be the two lines carrying the answer, which is to say the answer was 674 and
+675 and everything above it was a stage that is fine on a metric nobody asked about. The
+section below moved them.
 
 This was not a guess. The default metric set was widened from three to fourteen on
 2026-09-27 and the cost of that was recorded at the time as an open question, against logs
@@ -946,8 +948,10 @@ of three stages where it did not show. The arithmetic is the whole story, which 
 took a log rather than an argument to make it land. At 900 stages the same rule prints
 12,600 lines.
 
-Nothing about the output changed today. The fixture is the deliverable, and four checks now
-pin the line count so a change to the output has to account for it.
+Nothing about the output changed on the day this was captured. The fixture was the
+deliverable, and four checks pinned the line count so that a change to the output had to
+account for it. One of those four asserted the tally was second from last. It was right,
+and the next section is what made it wrong.
 
 ### A floor cannot be placed from one end of a range
 
@@ -957,39 +961,121 @@ pin the line count so a change to the output has to account for it.
 The `small` job runs the skewed distribution over 600 rows.
 
 ```
-$ python -m sjp skew tests/fixtures/eventlogs/small/* | grep -E '^ +skewed'
-  skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
-  skewed    stage 2  executor_run_time     4.8559  largest task 556 against a median of 114.5
+$ python -m sjp skew tests/fixtures/eventlogs/small/* --only skewed
+local-1790970475322  sjp-small  threshold 4.0  42 verdicts
+  worst count   stage 2 on records_read at 43.1667
+  worst bytes   stage 2 on local_bytes_read at 9.3934
+  worst millis  stage 2 on executor_run_time at 4.8559
+  4 skewed, 10 even, 28 undecided
+  showing 4 of 42, skewed only
   skewed    stage 2  records_read         43.1667  largest task 518 against a median of 12
   skewed    stage 2  local_bytes_read      9.3934  largest task 7449 against a median of 793
+  skewed    stage 2  executor_run_time     4.8559  largest task 556 against a median of 114.5
+  skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
 ```
 
-The last two are correct and useless. 7,449 bytes really is 9.4 times 793 bytes, and 518
-records really is 43 times 12. Neither is a thing anyone would act on.
+The two at the top are correct and useless. 7,449 bytes really is 9.4 times 793 bytes, and
+518 records really is 43 times 12. Neither is a thing anyone would act on.
 
 The millisecond floor was placed on evidence. The sweep `{0: 11, 30: 8, 50: 8, 100: 7,
 3041: 6}` is published further up this file, and 50 sits inside a gap where every value
-gives the same answer. The byte and count floors have no equivalent, because until today
-every log here measured bytes in the tens of millions. The skewed join's key exchange writes
+gives the same answer. The byte and count floors have no equivalent, because until the
+`small` capture every log here measured bytes in the tens of millions. The skewed join's key exchange writes
 88,788,038 of them. This stage reads 7,449. Four orders of magnitude apart and judged by the
 same rule.
 
-The two figures above came off the deterministic half of the log and reproduced across two
-separate captures to the record and to the byte. The two `executor_run_time` lines did not,
-because they are timings, so nothing pins them.
+The byte and record figures came off the deterministic half of the log and reproduced
+across two separate captures to the record and to the byte. The two `executor_run_time`
+lines did not, because they are timings, so nothing pins them.
 
 The floors are not set here. Setting a floor on the first log that ever populated the small
 end, on the same day that log was captured, is how the millisecond floor would have been
 placed badly.
 
+## The answer goes first now
+
+Added 2026-10-03. Three changes to the same command and not one of them is about length.
+
+**The summary moved to the top.** The worst line per unit, then the tally, then the
+verdicts. The wide log still prints exactly 675 lines. Trimming was never the fix.
+
+**`--only` filters the body**, one outcome at a time.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/wide/* --only skewed
+local-1790970447319  sjp-wide  threshold 4.0  672 verdicts
+  nothing skewed at this threshold
+  0 skewed, 103 even, 569 undecided
+  showing 0 of 672, skewed only
+```
+
+675 lines to 4. That last line is there because a reader who filters still has to be told
+what was left out.
+
+**The body is ranked, and the ranking stays inside a unit.** Skewed verdicts come first and
+undecided ones last. Inside an outcome the verdicts group by unit and sort by ratio with the
+worst first, and an unbounded ratio leads its own group.
+
+That last part is the one worth arguing about. Sorting the whole body by ratio is the
+comparison `worst` refuses to make for the summary line one function above it. The skewed
+log is where it shows, because three of its eight skewed verdicts divide by zero.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/* --only skewed | grep unbounded
+  skewed    stage 2  disk_spilled       unbounded  more than half the tasks read zero and one reads 88088795
+  skewed    stage 2  memory_spilled     unbounded  more than half the tasks read zero and one reads 620755808
+  skewed    stage 2  gc_time            unbounded  more than half the tasks read zero and one reads 71
+```
+
+`gc_time` has a largest task of 71 milliseconds. `memory_spilled` has 620,755,808 bytes.
+Both ratios are infinite, so a flat sort orders those two by nothing at all and whichever
+lands on top is a fact about the metric order rather than about the job. Grouping by unit
+first keeps the sort where it means something. The cost is that the body cannot say which
+single verdict is worst, and there is no cross unit answer to that question to give.
+
+### The flag does not change the answer
+
+`sjp.cli` says a flag must never move a command's declared effect, because a guard keyed on
+a command name cannot see a flag. The same argument covers a verdict. `--only` narrows what
+gets printed and nothing else, so the tally and the exit status still come off the whole
+scan.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/* --only undecided | grep skewed,
+  8 skewed, 6 even, 28 undecided
+$ python -m sjp skew tests/fixtures/eventlogs/skewed/* --only undecided > /dev/null
+$ echo $?
+1
+```
+
+A tally computed over the filtered list would read zero skewed on that command, which is a
+false statement about a job that skewed on eight.
+
+### Piping it to head is no longer a traceback
+
+675 lines is a thing a reader pipes into `head`, and that used to print a `BrokenPipeError`
+over the top of the output. The entry point catches it now and returns 141. The flush
+happens inside that handler rather than at interpreter shutdown, because a short command
+fits in the buffer and the write that fails is the final flush.
+
+141 and not 0. A shell reads 0 from this command as nothing skewed, and a run cut off part
+way through never finished answering.
+
+The status is not deterministic and this file says so rather than a check pinning a number
+it cannot reproduce. Measured over 20 runs each on 2026-10-03, `sjp skew` on the wide log
+returns 141 every time and `sjp stages` on 6 of 20. `stages` writes little enough that the
+buffer sometimes drains before the reader goes away. What held on all 40 runs is that
+stderr stayed empty.
+
 ## Running the checks
 
 ```
 python tests/run_all.py
-341 passed, 0 failed, 341 checks
+360 passed, 0 failed, 360 checks
 ```
 
-Every check is graded by a mutation pass rather than counted.
+Every check is graded by a mutation pass rather than counted. The three modules day 2
+touched were re-run on 2026-10-03 and the other nine rows are from earlier passes.
 
 ```
 sjp/layout.py: 87 mutation sites, running 0 to 87
@@ -1000,14 +1086,14 @@ sjp/model.py: 44 mutation sites, running 0 to 44
 44 killed, 0 survived, 0 ungraded, 44 graded
 sjp/plan.py: 30 mutation sites, running 0 to 30
 30 killed, 0 survived, 0 ungraded, 30 graded
-sjp/commands.py: 29 mutation sites, running 0 to 29
-29 killed, 0 survived, 0 ungraded, 29 graded
-sjp/skew.py: 28 mutation sites, running 0 to 28
-28 killed, 0 survived, 0 ungraded, 28 graded
+sjp/commands.py: 31 mutation sites, running 0 to 31
+31 killed, 0 survived, 0 ungraded, 31 graded
+sjp/skew.py: 31 mutation sites, running 0 to 31
+31 killed, 0 survived, 0 ungraded, 31 graded
 sjp/memory.py: 22 mutation sites, running 0 to 22
 22 killed, 0 survived, 0 ungraded, 22 graded
-sjp/cli.py: 18 mutation sites, running 0 to 18
-18 killed, 0 survived, 0 ungraded, 18 graded
+sjp/cli.py: 19 mutation sites, running 0 to 19
+19 killed, 0 survived, 0 ungraded, 19 graded
 sjp/eventlog.py: 9 mutation sites, running 0 to 9
 9 killed, 0 survived, 0 ungraded, 9 graded
 sjp/contract.py: 6 mutation sites, running 0 to 6
@@ -1091,10 +1177,25 @@ The model maps twelve accumulables onto a field it keeps per task. The grouping 
 the skewed job carries thirty seven. The other twenty five are not read, and nothing here
 argues that they are uninteresting.
 
-`sjp skew` prints every verdict with no ranking and no filter. On the eight committed logs
-that is between 45 and 675 lines. The summary is last, so the wider the log the further a
-reader scrolls to reach it. The `wide` fixture exists to hold that number still while it is
-fixed.
+Closed in v2. `sjp skew` used to print every verdict with no ranking and no filter, with the
+summary last, so the wider the log the further a reader scrolled to reach it. The summary is
+first now and `--only` filters the body. The wide log goes from 675 lines to 4 when asked
+for the skewed verdicts alone, and it still prints 675 unfiltered because the length was
+never the part that mattered.
+
+What the ranking does not do is compare two units. The body sorts by ratio inside a unit and
+groups the units in declared order, so a reader cannot ask which single verdict in a log is
+worst. That question has no answer a ratio can give.
+
+`sjp skew` judges any quantity a caller names with `--metric`, including `launch_time`,
+which is a point on the clock rather than an amount of anything. A median relative ratio over
+two wall clock instants is close to 1.0 by construction and means nothing. Nothing refuses it
+and the ranking sorts those verdicts after the measured kinds rather than raising.
+
+The exit status of a command whose output was cut off by a closed pipe is 141 on `sjp skew`
+and is not deterministic on the shorter commands. Measured on 2026-10-03 at 20 of 20 for
+`skew` and 6 of 20 for `stages`, because a short output can drain from the buffer before the
+reader goes away. stderr stayed empty on all 40 runs.
 
 The byte and count floors in `skew.FLOORS` are `None`, which means no floor. The `small`
 fixture populates the small end of both ranges and is the evidence those floors have been
