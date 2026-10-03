@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -17,6 +18,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
 BALANCED = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
 JOIN = os.path.join(HERE, "fixtures", "eventlogs", "join")
+WIDE = os.path.join(HERE, "fixtures", "eventlogs", "wide")
+ROOT = os.path.dirname(HERE)
 
 
 @contextlib.contextmanager
@@ -213,11 +216,46 @@ def check_skew_exits_one_on_the_skewed_log_and_zero_on_the_balanced_one():
 
 
 def check_skew_names_the_worst_stage_or_says_nothing_skewed():
+    """The worst lines sit directly under the header as of day 2.
+
+    They used to be last. This check asserted that, correctly, for as long as it was true.
+    What it is pinning now is the position and not just the presence, because the whole
+    point of moving them is that a reader should not have to reach the bottom of 672 lines
+    to find out whether anything is wrong.
+    """
     _code, guilty = _run(["skew", _only_log(SKEWED)])
     _code, clean = _run(["skew", _only_log(BALANCED)])
-    assert guilty.strip().splitlines()[-1].strip().startswith("worst millis"), guilty
+    head = guilty.strip().splitlines()
+    assert head[1].strip().startswith("worst count"), head[:4]
+    assert head[3].strip().startswith("worst millis"), head[:4]
     assert "worst bytes   stage 2 on memory_spilled" in guilty, guilty
-    assert clean.strip().splitlines()[-1].strip() == "nothing skewed at this threshold", clean
+    assert clean.strip().splitlines()[1].strip() == "nothing skewed at this threshold", clean
+
+
+def check_only_skewed_prints_the_problems_and_nothing_else():
+    _code, text = _run(["skew", _only_log(SKEWED), "--only", "skewed"])
+    body = [line for line in text.strip().splitlines() if line.startswith("  skewed")
+            or line.startswith("  even") or line.startswith("  undecided")]
+    assert len(body) == 8, body
+    assert all(line.startswith("  skewed") for line in body), body
+    assert "showing 8 of 42, skewed only" in text, text
+
+
+def check_only_does_not_change_the_exit_status_or_the_tally():
+    """A flag that changed either would be a flag that changes the answer.
+
+    `sjp.cli` declares an effect per command and says a flag must never move it. The same
+    argument applies to a verdict. The exit status is the whole scan's and so is the tally,
+    and `--only undecided` on the skewed log is the case that would hide all eight.
+    """
+    full_code, full = _run(["skew", _only_log(SKEWED)])
+    for outcome in ("skewed", "even", "undecided"):
+        code, text = _run(["skew", _only_log(SKEWED), "--only", outcome])
+        assert code == full_code == 1, (outcome, code, full_code)
+        assert "8 skewed, 6 even, 28 undecided" in text, (outcome, text)
+    clean_code, clean = _run(["skew", _only_log(BALANCED), "--only", "skewed"])
+    assert clean_code == 0, clean_code
+    assert "showing 0 of" in clean, clean
 
 
 def check_skew_prints_one_line_per_stage_and_metric_plus_three():
@@ -476,3 +514,47 @@ def check_layout_passes_the_broadcast_threshold_through_to_the_count():
     code, text = _run(["layout", "--broadcast", "1", _only_log(JOIN)])
     assert code == 1, code
     assert "2 worth changing" in text, text
+
+
+def check_an_unknown_only_value_is_refused_by_the_parser():
+    with _quiet() as caught:
+        try:
+            commands.skew_parser().parse_args([_only_log(SKEWED), "--only", "broken"])
+        except SystemExit as exit_code:
+            assert exit_code.code == 2, exit_code.code
+        else:
+            raise AssertionError("accepted an outcome that does not exist")
+    # "invalid choice" and not just the word. argparse refuses an unknown value and an
+    # option it has never heard of with the same status and a different message, so
+    # checking for the value alone passes against a tree where --only does not exist.
+    # Caught by running this check against HEAD before committing.
+    message = caught.getvalue()
+    assert "invalid choice" in message, message
+    assert "skewed" in message, message
+
+
+def check_a_closed_pipe_does_not_print_a_traceback():
+    """`sjp skew` on the wide log is 675 lines, so a reader pipes it to `head`.
+
+    This runs the entry point as a process, because a BrokenPipeError needs a real pipe
+    and nothing else in the suite leaves this interpreter.
+
+    Measured 2026-10-03 over 20 runs each. `skew` returns 141 on all 20 and `stages` on 6
+    of 20, because `stages` writes little enough that the buffer sometimes drains before
+    the reader goes away. So what is asserted is the part that holds. stderr stays empty
+    and the status is either the command's own or 141. The racy half is in the README
+    rather than pinned here, because pinning a number this check cannot reproduce is how a
+    flaky test gets written.
+    """
+    wide = _only_log(WIDE)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    for name, own in (("skew", (0, 1)), ("stages", (0,))):
+        proc = subprocess.Popen([sys.executable, "-m", "sjp", name, wide], cwd=ROOT,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        proc.stdout.readline()
+        proc.stdout.close()
+        stderr = proc.stderr.read()
+        proc.stderr.close()
+        proc.wait()
+        assert stderr == b"", (name, stderr[-300:])
+        assert proc.returncode in own + (141,), (name, proc.returncode)

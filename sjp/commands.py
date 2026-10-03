@@ -152,6 +152,10 @@ def skew_parser():
                         help="largest task over the median, above which a stage is skewed")
     parser.add_argument("--metric", action="append", dest="metrics",
                         help="a task field to judge, repeatable")
+    # Narrows the printed body and nothing else. Every verdict is still computed, the
+    # tally still counts all of them, and the exit status is still the whole scan's.
+    parser.add_argument("--only", choices=skew.OUTCOMES,
+                        help="print only the verdicts with this outcome")
     return parser
 
 
@@ -168,26 +172,28 @@ def ratio_text(verdict):
     return "{:.4f}".format(verdict.ratio)
 
 
-def skew_lines(app, verdicts, threshold):
-    """Every verdict, then the tally, then the one to look at first.
+def skew_lines(app, verdicts, threshold, only=None):
+    """The answer, then the tally, then the evidence behind them.
 
     Takes the verdicts rather than computing them, so the lines and the command's exit
     status cannot come from two separate scans that disagree.
 
-    The tally is printed even when it is all zeros in a column, because a summary that
-    drops an empty outcome is a summary that cannot report the absence of a problem.
+    The order here is the day 2 change and the reason is the wide fixture. 48 stages times
+    14 metrics is 672 verdict lines for a job that is not skewed anywhere, and the two
+    lines answering the question used to be 674 and 675. Nothing about the length was the
+    problem. A reader scrolling to the bottom of a screen of noise to find out there was
+    no problem is the problem, and it does not get better by trimming.
+
+    `only` filters the body. The summary above it is always computed over everything, so a
+    filtered run still reports how many verdicts it is not showing.
+
+    The tally prints even when a column is zero, because a summary that drops an empty
+    outcome cannot report the absence of a problem.
     """
     lines = ["{}  {}  threshold {}  {}".format(
         app.app_id, app.name, threshold, counted(len(verdicts), "verdict"))]
-    for verdict in verdicts:
-        lines.append("  {:<9} stage {}  {:<17} {:>10}  {}".format(
-            verdict.outcome, verdict.stage_id, verdict.metric,
-            ratio_text(verdict), verdict.why))
-    tally = skew.counts(verdicts)
-    lines.append("  {} skewed, {} even, {} undecided".format(
-        tally[skew.SKEWED], tally[skew.EVEN], tally[skew.UNDECIDED]))
-    # One worst per unit rather than one overall. A ratio has no unit, so the single
-    # answer this printed before was decided by whichever metric the scan reached first.
+    # One worst per unit rather than one overall. A ratio has no unit, so a single answer
+    # across every metric is decided by whichever one the scan reached first.
     found = skew.worst_by_kind(verdicts)
     if not found:
         lines.append("  nothing skewed at this threshold")
@@ -196,6 +202,18 @@ def skew_lines(app, verdicts, threshold):
         if first is not None:
             lines.append("  worst {:<7} stage {} on {} at {}".format(
                 kind, first.stage_id, first.metric, ratio_text(first)))
+    tally = skew.counts(verdicts)
+    lines.append("  {} skewed, {} even, {} undecided".format(
+        tally[skew.SKEWED], tally[skew.EVEN], tally[skew.UNDECIDED]))
+
+    body = skew.ranked(verdicts if only is None else skew.only(verdicts, only))
+    if only is not None:
+        lines.append("  showing {} of {}, {} only".format(
+            len(body), len(verdicts), only))
+    for verdict in body:
+        lines.append("  {:<9} stage {}  {:<17} {:>10}  {}".format(
+            verdict.outcome, verdict.stage_id, verdict.metric,
+            ratio_text(verdict), verdict.why))
     return lines
 
 
@@ -207,7 +225,7 @@ def skew_command(rest):
     metrics = tuple(args.metrics) if args.metrics else skew.DEFAULT_METRICS
     app = eventlog.profile(args.path)
     verdicts = skew.scan(app, metrics, args.threshold)
-    for line in skew_lines(app, verdicts, args.threshold):
+    for line in skew_lines(app, verdicts, args.threshold, args.only):
         print(line)
     # Exit 1 when something skewed, so this is usable from a shell that checks a status.
     return 1 if skew.counts(verdicts)[skew.SKEWED] else 0

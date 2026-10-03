@@ -37,6 +37,9 @@ GROUPING_STAGE = 2
 WIDE_STAGES = 48
 WIDE_VERDICTS = 672
 WIDE_LINES = 675
+# Measured 2026-10-03 with `--only skewed`. The header, the nothing skewed line, the tally
+# and the line saying the body is empty.
+WIDE_FILTERED_LINES = 4
 
 # `small` at 600 rows. These two came off the deterministic half of the log and reproduced
 # across two separate captures to the record and to the byte, which is why they can be
@@ -230,12 +233,15 @@ def check_the_wide_fixture_still_carries_the_stage_count_it_was_captured_for():
     assert len(app.stages) == WIDE_STAGES, len(app.stages)
 
 
-def check_the_wide_fixture_produces_an_unreadable_number_of_lines():
-    """This is `ot-095` as a check rather than as an argument.
+def check_the_wide_fixture_still_prints_675_lines_and_answers_in_the_first_three():
+    """This is `ot-095` after day 2, and the line count is deliberately unchanged.
 
-    The five cycle 1 logs all print between 45 and 61 lines, which fits on a screen. This
-    one prints 675 for a job where nothing is skewed at all. The useful content is the
-    tally and the worst line per unit, and both sit at the very bottom.
+    675 lines for a job with nothing wrong with it was never a length problem. The two
+    lines carrying the answer were 674 and 675, so a reader scrolled a screen of noise to
+    reach them. Day 2 moved them to 2 and 3 and left the body where it was.
+
+    The five cycle 1 logs all print between 45 and 61 lines, which is why five weeks of
+    work on this tool never ran into this.
     """
     from sjp import commands, skew
 
@@ -244,10 +250,27 @@ def check_the_wide_fixture_produces_an_unreadable_number_of_lines():
     assert len(verdicts) == WIDE_VERDICTS, len(verdicts)
     lines = commands.skew_lines(app, verdicts, skew.DEFAULT_THRESHOLD)
     assert len(lines) == WIDE_LINES, len(lines)
-    # The thing that makes it unreadable is not the length on its own. It is that the
-    # summary is last, so a reader scrolls past 672 lines to reach the three that answer
-    # the question they asked.
-    assert "skewed," in lines[-2], lines[-2]
+    assert "nothing skewed" in lines[1], lines[1]
+    assert "skewed," in lines[2], lines[2]
+    # The check this replaces asserted the opposite, that the tally was second from last.
+    # It was right about yesterday's tree.
+    assert "skewed," not in lines[-2], lines[-2]
+
+
+def check_filtering_the_wide_fixture_answers_in_four_lines():
+    """`--only skewed` is what makes the wide fixture readable, and the figure is measured.
+
+    675 lines to 4 on a log where the answer is that nothing is skewed. The body goes to
+    zero rows and the fourth line says so, because a reader who filters still has to be
+    told what was left out.
+    """
+    from sjp import commands, skew
+
+    app = _app("wide")
+    lines = commands.skew_lines(app, skew.scan(app), skew.DEFAULT_THRESHOLD,
+                                only=skew.SKEWED)
+    assert len(lines) == WIDE_FILTERED_LINES, len(lines)
+    assert lines[-1].strip() == "showing 0 of 672, skewed only", lines[-1]
 
 
 def check_the_small_fixture_reports_byte_and_record_skew_nobody_would_act_on():
