@@ -402,3 +402,88 @@ def check_a_verdict_reason_carries_both_numbers_it_was_decided_on():
     stage = _app(SKEWED_DIR).stage(GROUPING_STAGE)
     why = skew.judge(stage, "records_read").why
     assert "6932663" in why and "156784" in why, why
+
+# ranking and filtering, added day 2 for ot-095
+
+def check_ranking_is_a_permutation_and_drops_nothing():
+    """A reordering that loses a row is the failure mode the tally would not catch."""
+    verdicts = skew.scan(_app(SKEWED_DIR))
+    ranked = skew.ranked(verdicts)
+    assert len(ranked) == len(verdicts), (len(ranked), len(verdicts))
+    assert sorted(map(id, ranked)) == sorted(map(id, verdicts))
+
+
+def check_ranking_puts_every_skewed_verdict_above_every_other_one():
+    verdicts = skew.ranked(skew.scan(_app(SKEWED_DIR)))
+    outcomes = [verdict.outcome for verdict in verdicts]
+    assert outcomes == sorted(outcomes, key=skew.OUTCOMES.index), outcomes
+
+
+def check_ranking_keeps_an_unbounded_ratio_inside_its_own_unit():
+    """The reason `rank_key` sorts by kind before ratio, measured on the skewed log.
+
+    Three of its eight skewed verdicts divide by zero, and they span two kinds. gc_time's
+    largest task is 71 milliseconds and memory_spilled's is 620,755,808 bytes. Both ratios
+    are `inf`, so a flat sort by ratio orders those two by nothing at all and whichever
+    comes first is a fact about the metric order.
+    """
+    skewed = skew.only(skew.ranked(skew.scan(_app(SKEWED_DIR))), skew.SKEWED)
+    unbounded = [verdict.metric for verdict in skewed if verdict.unbounded]
+    assert unbounded == ["disk_spilled", "memory_spilled", "gc_time"], unbounded
+    kinds = [model.kind_of(verdict.metric) for verdict in skewed]
+    assert kinds == sorted(kinds, key=model.KINDS.index), kinds
+    # gc_time leads the millis block on a value four orders below the byte verdicts above
+    # it, which is the whole argument for not ranking the two against each other.
+    millis = [verdict for verdict in skewed if model.kind_of(verdict.metric) == model.MILLIS]
+    assert millis[0].metric == "gc_time", [v.metric for v in millis]
+    assert millis[0].largest == 71, millis[0].largest
+
+
+def check_ranking_does_not_depend_on_the_order_the_metrics_were_asked_for():
+    app = _app(SKEWED_DIR)
+    forward = skew.ranked(skew.scan(app, skew.DEFAULT_METRICS))
+    backward = skew.ranked(skew.scan(app, tuple(reversed(skew.DEFAULT_METRICS))))
+    assert [(v.stage_id, v.metric) for v in forward] == \
+           [(v.stage_id, v.metric) for v in backward]
+
+
+def check_an_undecided_verdict_sorts_last_inside_its_kind_rather_than_crashing():
+    """`ratio` is None on every undecided verdict, so the sort needs a value for it."""
+    verdicts = skew.ranked(skew.scan(_app(SKEWED_DIR)))
+    undecided = skew.only(verdicts, skew.UNDECIDED)
+    assert undecided, "the skewed log has 28 of these"
+    assert all(verdict.ratio is None for verdict in undecided)
+    assert verdicts[-len(undecided):] == undecided
+
+
+def check_ranking_accepts_a_metric_whose_kind_is_not_measured():
+    """`scan` judges any declared quantity a caller names and launch_time is an instant.
+
+    That verdict is arithmetic on a clock reading and it should not exist. Sorting is not
+    where that gets decided, so `rank_key` orders it after the measured kinds rather than
+    raising. Recorded as a thread on day 2 rather than fixed here.
+    """
+    verdicts = skew.scan(_app(SKEWED_DIR), ("launch_time", "records_read"))
+    ranked = skew.ranked(verdicts)
+    assert len(ranked) == len(verdicts)
+    instants = [v for v in ranked if model.kind_of(v.metric) == model.INSTANT]
+    assert instants, "launch_time is declared an instant"
+
+
+def check_only_narrows_the_body_and_leaves_the_tally_alone():
+    verdicts = skew.scan(_app(SKEWED_DIR))
+    tally = skew.counts(verdicts)
+    for outcome in skew.OUTCOMES:
+        subset = skew.only(verdicts, outcome)
+        assert len(subset) == tally[outcome], (outcome, len(subset), tally[outcome])
+        assert all(verdict.outcome == outcome for verdict in subset)
+    assert skew.counts(verdicts) == tally
+
+
+def check_only_refuses_an_outcome_that_is_not_one():
+    try:
+        skew.only(skew.scan(_app(SKEWED_DIR)), "bad")
+    except ValueError as error:
+        assert "is not an outcome" in str(error), str(error)
+    else:
+        raise AssertionError("accepted an outcome that does not exist")

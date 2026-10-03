@@ -188,6 +188,54 @@ def counts(verdicts):
     return tally
 
 
+def rank_key(verdict):
+    """Where one verdict sits when the body is ordered for reading.
+
+    Outcome first, then the unit, then the ratio inside the unit.
+
+    Sorting the whole list by ratio is the comparison `worst` below refuses to make. On
+    the skewed log that sort puts gc_time's 71 millisecond unbounded ratio level with a
+    620,755,808 byte spill, because both divide by zero and a ratio carries no unit. Three
+    of that log's eight skewed verdicts are unbounded and they span two kinds. So the sort
+    stays inside a kind, where it is a comparison.
+
+    The cost is that the body cannot say which single verdict is worst. The worst lines
+    answer that per unit and there is no cross unit answer to give.
+
+    Kinds come from `model.KINDS` rather than `model.MEASURED` because `scan` will judge
+    any declared quantity a caller names and `--metric launch_time` is accepted today.
+    That verdict is arithmetic on a clock reading and sorting it is not what makes it
+    wrong, so it sorts after the measured kinds instead of raising here.
+    """
+    ratio = verdict.ratio
+    return (OUTCOMES.index(verdict.outcome),
+            model.KINDS.index(model.kind_of(verdict.metric)),
+            # Descending, so the worst is first. An unbounded ratio goes to -inf and leads
+            # its kind. None has nothing to order by and goes last.
+            -ratio if ratio is not None else math.inf,
+            verdict.stage_id,
+            verdict.metric)
+
+
+def ranked(verdicts):
+    """Every verdict in reading order. Skewed first, then even, then undecided."""
+    return sorted(verdicts, key=rank_key)
+
+
+def only(verdicts, outcome):
+    """The verdicts carrying one outcome, for a reader who wants the problems alone.
+
+    This narrows what gets printed and never what was judged. `counts`, `worst_by_kind`
+    and the command's exit status all read the whole scan, because a flag that changes the
+    answer is the thing `sjp.cli` exists to prevent. A tally computed over this would read
+    0 even and 0 undecided on every log and be a false statement about the job.
+    """
+    if outcome not in OUTCOMES:
+        raise ValueError("{!r} is not an outcome. Expected one of {}".format(
+            outcome, OUTCOMES))
+    return [verdict for verdict in verdicts if verdict.outcome == outcome]
+
+
 def worst(verdicts, kind):
     """The skewed verdict to act on first within one unit, or None when nothing skewed.
 
