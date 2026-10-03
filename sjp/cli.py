@@ -17,6 +17,7 @@ The declared effect is a claim. `sjp.contract` is what tests the claim.
 """
 import argparse
 import json
+import os
 import sys
 
 READ = "read"
@@ -85,4 +86,22 @@ def main(argv=None):
         return 0
     parser = build_parser()
     args, rest = parser.parse_known_args(argv)
-    return COMMANDS[args.name]["run"](rest)
+    try:
+        code = COMMANDS[args.name]["run"](rest)
+        # Flushed here rather than left to interpreter shutdown. A short command fits in
+        # the buffer, so the write that fails is the final flush, and a flush outside this
+        # block dies with its own message and an exit status of 120. Measured on
+        # `sjp stages ... | head -3`, which is a shorter output than `sjp skew`.
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # `sjp skew` on a 48 stage log prints 675 lines, so piping it to `head` is the
+        # obvious thing to do and it used to print a traceback. Python also complains
+        # again while flushing stdout at shutdown, which is why this reopens the
+        # descriptor on devnull rather than just swallowing the exception.
+        #
+        # 141 and not 0. A shell reads 0 from this command as nothing skewed, and a run
+        # cut off part way through never finished answering. 128 plus SIGPIPE is what a
+        # shell reports for a pipeline killed this way.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 141
