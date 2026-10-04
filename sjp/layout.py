@@ -72,6 +72,17 @@ class Shuffle:
         return self.written / self.partitions
 
     @property
+    def origin_kind(self):
+        """Which of plan's three readings this exchange's origin gets.
+
+        `changeable` is a boolean and has nowhere to put an origin nobody here has seen,
+        so it collapses that case into the query one. The refusal printed beside it then
+        reads as a statement about the query, which is the shape of the defect that cost
+        `REPARTITION_BY_COL` two days.
+        """
+        return plan.origin_kind(self.origin)
+
+    @property
     def counts_agree(self):
         """Whether the count in the plan text and the count the driver reported match.
 
@@ -113,7 +124,50 @@ class Sizing:
     why: str
 
 
-def size(shuffle, slots, advisory=ADVISORY_BYTES):
+def volume(group):
+    """The measured bytes one partition count divides.
+
+    The sum over every exchange that count controls. A sort merge join shuffles both sides
+    into the same stage and each partition of that stage reads its slice of both, so the
+    volume a count is sized against is the pair rather than either side. Sizing the small
+    side on its own is what produced a second target for a number that can only hold one.
+
+    None when any member's bytes never reached the driver. A sum that silently drops a
+    missing term is a smaller number rather than an unknown one, and small is the
+    direction that reads as a confident answer.
+    """
+    if any(shuffle.written is None for shuffle in group):
+        return None
+    return sum(shuffle.written for shuffle in group)
+
+
+def _refusal(shuffle):
+    """Why a count is not this config's to change, from each thing that can make it so.
+
+    An origin on neither of plan's lists is a gap in this repo rather than a number
+    somebody typed, so it does not get the sentence about the query. Reading the second as
+    the first is the whole of the defect this split exists for.
+
+    The last case is the two fields disagreeing. `changeable` is what the branch above was
+    taken on and `origin` is what it was derived from, and they are separate fields because
+    a copy is where two readings of one fact drift apart. A message built from the origin
+    alone states the drift as a fact about the query, which is a confident wrong sentence
+    where the honest one is short.
+    """
+    if shuffle.origin_kind == plan.QUERY:
+        return "{} is an argument in the query, so the config does not decide it".format(
+            shuffle.origin)
+    if shuffle.origin_kind == plan.UNRECOGNISED:
+        if shuffle.origin:
+            return ("{} is not an origin this tool has a reading for, so whether the "
+                    "config decides this count is unknown".format(shuffle.origin))
+        return ("the plan text names no origin, so whether the config decides this "
+                "count is unknown")
+    return ("{} is an origin the config decides and this exchange is flagged otherwise, "
+            "so the two readings of one fact disagree".format(shuffle.origin))
+
+
+def size_of(group, slots, advisory=ADVISORY_BYTES):
     """The partition count the measured volume and the slot count imply.
 
     The floor is the slot count. A shuffle split into fewer partitions than there are
@@ -125,24 +179,29 @@ def size(shuffle, slots, advisory=ADVISORY_BYTES):
     nothing to divide or schedule. An exchange whose measured bytes never reached the driver
     leaves nothing to size against the advisory. Both raised a `TypeError` out of `divmod`
     before, on a shape no committed log reaches and every real job does.
+
+    Takes a group because a count is a property of the decision and not of one exchange.
+    The members agree on the count by the time they are grouped, so the first one carries
+    it for all of them.
     """
-    current = shuffle.partitions or shuffle.declared
+    first = group[0]
+    current = first.partitions or first.declared
     if current is None:
         return Sizing(current=None, target=None, from_volume=None, current_waves=None,
                       target_waves=None,
                       why="no count in the plan text and none from the driver, so there "
                           "is nothing to size")
-    if shuffle.written is None:
+    written = volume(group)
+    if written is None:
         return Sizing(current=current, target=None, from_volume=None,
                       current_waves=waves(current, slots), target_waves=None,
                       why="the driver reported no shuffle bytes, so the volume this would "
                           "be sized against is missing")
-    from_volume = max(1, math.ceil(shuffle.written / advisory))
-    if not shuffle.changeable:
+    from_volume = max(1, math.ceil(written / advisory))
+    if not first.changeable:
         return Sizing(current=current, target=None, from_volume=from_volume,
                       current_waves=waves(current, slots), target_waves=None,
-                      why="{} is an argument in the query, so the config does not "
-                          "decide it".format(shuffle.origin))
+                      why=_refusal(first))
 
     target = max(from_volume, slots)
     # Rounded up to a whole number of rounds. The argument for this used to be that a
@@ -159,13 +218,22 @@ def size(shuffle, slots, advisory=ADVISORY_BYTES):
     target = int(math.ceil(target / slots) * slots)
     if target == current:
         why = "{} bytes over {} partitions is already inside the advisory size".format(
-            shuffle.written, current)
+            written, current)
     else:
         why = "{} bytes at an advisory {} wants {}, and the {} slots round it to {}".format(
-            shuffle.written, advisory, from_volume, slots, target)
+            written, advisory, from_volume, slots, target)
     return Sizing(current=current, target=target, from_volume=from_volume,
                   current_waves=waves(current, slots), target_waves=waves(target, slots),
                   why=why)
+
+
+def size(shuffle, slots, advisory=ADVISORY_BYTES):
+    """One exchange sized on its own, which is the one member case of `size_of`.
+
+    Kept because most exchanges are their own decision and because sizing a side in
+    isolation is the comparison that shows what grouping changed.
+    """
+    return size_of((shuffle,), slots, advisory)
 
 
 @dataclass(frozen=True)
@@ -332,12 +400,95 @@ def advise(app, shuffle, advisory=ADVISORY_BYTES, threshold=skew.DEFAULT_THRESHO
     stage like that. The honest answer is a different key or a salt and an event log
     carries no key distribution to propose one from.
     """
-    sizing = size(shuffle, app.slots, advisory)
+    return advise_decision(app, Decision(shuffles=(shuffle,), stage_id=None),
+                           advisory, threshold, floors)
+
+
+@dataclass(frozen=True)
+class Decision:
+    """The exchanges one partition count controls, and the stage they feed.
+
+    `stage_id` is None when nothing grouped this exchange with another. That is every
+    exchange on every committed log except the two under each sort merge join.
+    """
+    shuffles: tuple
+    stage_id: int
+
+
+def _decides_with(app, shuffle):
+    """The stage that says which count this exchange belongs to, or None for its own.
+
+    Only a config decided origin can share a count. Two `repartition` arguments feeding
+    one stage are two numbers typed in two places, so they are two decisions however the
+    plan arranges them, and an origin nobody here recognises is not known to be either.
+
+    None also when the reading stage cannot be named. Grouping on a stage nothing
+    identified would be grouping on a guess, and the two exchanges it merged would lose
+    their separate byte counts for no reason anybody could check.
+    """
+    if shuffle.origin_kind != plan.CONFIG:
+        return None
+    stage = reading_stage(app, shuffle)
+    return None if stage is None else stage.stage_id
+
+
+def decisions(app, root):
+    """One plan's exchanges, grouped into the partition counts they really are.
+
+    `spark.sql.shuffle.partitions` is one number. A sort merge join partitions both sides
+    by the same key into the same number of pieces, so the two exchanges under it are one
+    decision, and sizing them apart gave the join log two targets for a number that can
+    only hold one. The large side asked for 4 and the small side asked for 2.
+
+    A group whose members disagree on the count comes back apart. The count being shared
+    is the premise the grouping rests on, so a disagreement falsifies it, and printing
+    both separately is the answer that does not hide the contradiction.
+    """
+    groups = []
+    where = {}
+    for shuffle in shuffles(app, root):
+        key = _decides_with(app, shuffle)
+        if key is not None and key in where:
+            groups[where[key]][1].append(shuffle)
+            continue
+        if key is not None:
+            where[key] = len(groups)
+        groups.append((key, [shuffle]))
+    found = []
+    for key, group in groups:
+        # No length guard. A group of one holds one count, so the set below holds one
+        # element and this is never true of it. A `len(group) > 1` in front of it was a
+        # mutation site nothing could grade, because both readings of it are the same
+        # function.
+        if len({shuffle.partitions for shuffle in group}) != 1:
+            found.extend(Decision(shuffles=(shuffle,), stage_id=None)
+                         for shuffle in group)
+            continue
+        found.append(Decision(shuffles=tuple(group),
+                              stage_id=key if len(group) > 1 else None))
+    return found
+
+
+def advise_decision(app, decision, advisory=ADVISORY_BYTES,
+                    threshold=skew.DEFAULT_THRESHOLD, floors=None):
+    """`advise` over a whole decision, which is where the guard belongs.
+
+    Withholding once per decision rather than once per exchange. The reason the guard
+    prints names the hot key on the stage the count divides, and both sides of a join feed
+    one stage, so printing it twice stated one finding as two and attached the large
+    side's hot key to a 2,401 byte exchange that has no keys to speak of.
+
+    Every member has to be a hash for the guard to apply. Its mechanism is that a hash
+    sends one key to one partition at any count, which says nothing about a round robin
+    that never looks at a key.
+    """
+    group = decision.shuffles
+    sizing = size_of(group, app.slots, advisory)
     if sizing.target is None or sizing.target >= sizing.current:
         return Advice(sizing=sizing, withheld=False, why="")
-    if shuffle.scheme != KEY_HASH:
+    if any(shuffle.scheme != KEY_HASH for shuffle in group):
         return Advice(sizing=sizing, withheld=False, why="")
-    verdict = hot_key(app, shuffle, threshold, floors)
+    verdict = hot_key(app, group[0], threshold, floors)
     if verdict is None or verdict.outcome != skew.SKEWED:
         return Advice(sizing=sizing, withheld=False, why="")
     return Advice(
@@ -365,8 +516,8 @@ def actionable(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
         root = plan.read(info)
         found += sum(1 for candidate in candidates(app, root, threshold)
                      if candidate.worth_it)
-        for shuffle in shuffles(app, root):
-            advice = advise(app, shuffle, advisory)
+        for decision in decisions(app, root):
+            advice = advise_decision(app, decision, advisory)
             sizing = advice.sizing
             if advice.withheld:
                 continue
@@ -375,13 +526,33 @@ def actionable(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
     return found
 
 
-def _shuffle_lines(shuffle, advice, slots):
-    """The block one exchange prints.
+def _per_partition(group):
+    """Measured bytes a partition of this decision carries, or None.
+
+    The decision's whole volume over its count. `Shuffle.per_partition` is the one
+    exchange reading of the same thing and it divides a byte count that may not be there,
+    so this answers None where that raises.
+    """
+    if not group[0].partitions:
+        return None
+    written = volume(group)
+    return None if written is None else written / group[0].partitions
+
+
+def _decision_lines(decision, advice, slots):
+    """The block one partition count prints.
 
     Its own function because most of the branches below are about a shape no
     committed log reaches. Left inline they could only be reached through a whole
     application, which is how a branch ends up graded on nothing.
+
+    A decision controlling more than one exchange keeps a byte line for each, because
+    those are separate measurements and the report is a reading of the log as well as a
+    recommendation. What it prints once is the count, the schedule and the advice, which
+    are the parts there is only one of.
     """
+    group = decision.shuffles
+    shuffle = group[0]
     sizing = advice.sizing
     lines = []
     if shuffle.partitions is None:
@@ -390,8 +561,15 @@ def _shuffle_lines(shuffle, advice, slots):
     else:
         lines.append("  {} into {} partitions  chosen by {}".format(
             shuffle.scheme, shuffle.partitions, shuffle.origin))
-    lines.append("      {:<13} {} measured  {} estimated".format(
-        "bytes", shuffle.written, shuffle.estimated))
+    if len(group) > 1:
+        lines.append("      {:<13} {} into stage {}, and one count decides them".format(
+            "exchanges", len(group), decision.stage_id))
+    for member in group:
+        lines.append("      {:<13} {} measured  {} estimated".format(
+            "bytes", member.written, member.estimated))
+    if len(group) > 1:
+        lines.append("      {:<13} {} measured in total, which is what the count "
+                     "divides".format("bytes", volume(group)))
     # The plan text and the driver both carry the count and nothing makes them
     # agree. Reading one without the other is quoting a number that had a control
     # sitting next to it.
@@ -406,12 +584,13 @@ def _shuffle_lines(shuffle, advice, slots):
     else:
         lines.append("      {:<13} says {} against the driver's {}".format(
             "plan text", shuffle.declared, shuffle.partitions))
-    if shuffle.per_partition is None:
+    each = _per_partition(group)
+    if each is None:
         lines.append("      {:<13} unknown. no count to divide the bytes by".format(
             "per partition"))
     else:
         lines.append("      {:<13} {:.0f} measured bytes each".format(
-            "per partition", shuffle.per_partition))
+            "per partition", each))
     if sizing.current_waves is None:
         lines.append("      {:<13} unknown. {}".format("schedule", sizing.why))
     else:
@@ -439,6 +618,11 @@ def _shuffle_lines(shuffle, advice, slots):
     return lines
 
 
+def _shuffle_lines(shuffle, advice, slots):
+    """The block one lone exchange prints, which is the one member case."""
+    return _decision_lines(Decision(shuffles=(shuffle,), stage_id=None), advice, slots)
+
+
 def _rounds(count):
     """A round count with its noun. One round is not "1 rounds"."""
     return "{} round{}".format(count, "" if count == 1 else "s")
@@ -454,9 +638,9 @@ def layout_lines(app, advisory=ADVISORY_BYTES, threshold=BROADCAST_BYTES):
 
     for info in app.plans:
         root = plan.read(info)
-        for shuffle in shuffles(app, root):
-            lines.extend(_shuffle_lines(
-                shuffle, advise(app, shuffle, advisory), app.slots))
+        for decision in decisions(app, root):
+            lines.extend(_decision_lines(
+                decision, advise_decision(app, decision, advisory), app.slots))
         for found in candidates(app, root, threshold):
             verdict = "broadcast it" if found.worth_it else "leave it shuffled"
             lines.append("  {} side of {}  {}".format(

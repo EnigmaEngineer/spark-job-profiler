@@ -498,22 +498,35 @@ def check_layout_exits_zero_when_nothing_in_the_log_is_the_config_to_change():
 
 
 def check_layout_exits_one_when_something_is_worth_changing():
+    """Two, not three. The join log's two hash exchanges are one count, so the partition
+    target they share is counted once and the broadcast candidate is the other."""
     code, text = _run(["layout", _only_log(JOIN)])
     assert code == 1, code
-    assert "3 worth changing" in text, text
+    assert "2 worth changing" in text, text
 
 
 def check_layout_passes_the_advisory_size_through_to_the_count():
-    """A flag nothing reads looks exactly like a flag that works."""
+    """A flag nothing reads looks exactly like a flag that works.
+
+    The total is asserted and so is the arithmetic, because the total alone is a weak
+    witness. Several advisory sizes move the target without moving the count, so a check
+    reading only the count would pass on a flag that reached the report and not the sum.
+    21000000 bytes over the log's eight partitions is 168000000, which is above the
+    163275083 the pair really wrote, so the count stops being advice.
+    """
     code, text = _run(["layout", "--advisory", "21000000", _only_log(JOIN)])
     assert code == 1, code
-    assert "2 worth changing" in text, text
+    assert "1 worth changing" in text, text
+    assert "163275083 bytes over 8 partitions is already inside" in text, text
 
 
 def check_layout_passes_the_broadcast_threshold_through_to_the_count():
+    """A one byte threshold takes the broadcast candidate out and leaves the one partition
+    target the join's two exchanges share."""
     code, text = _run(["layout", "--broadcast", "1", _only_log(JOIN)])
     assert code == 1, code
-    assert "2 worth changing" in text, text
+    assert "1 worth changing" in text, text
+    assert "broadcast it" not in text, text
 
 
 def check_an_unknown_only_value_is_refused_by_the_parser():

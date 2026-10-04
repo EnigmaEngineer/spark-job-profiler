@@ -297,11 +297,18 @@ def check_a_candidate_with_no_measurement_of_the_other_side_is_not_worth_it():
 
 # the lines the command prints
 
-def check_the_lines_name_the_origin_of_every_exchange():
+def check_the_lines_name_the_origin_of_every_decision():
+    """Once per decision rather than once per exchange.
+
+    The join log carries three exchanges and two decisions. `ENSURE_REQUIREMENTS` is
+    named once because one count covers both of its exchanges, and the block says how
+    many it covers so the reader is not left to count byte lines.
+    """
     app = _app(JOIN)
     lines = layout.layout_lines(app)
-    assert sum(1 for line in lines if plan.CHOSEN_BY_SPARK in line) == 2
+    assert sum(1 for line in lines if plan.CHOSEN_BY_SPARK in line) == 1
     assert sum(1 for line in lines if plan.CHOSEN_BY_HAND in line) == 2
+    assert any("exchanges     2 into stage 3" in line for line in lines)
 
 def check_the_lines_say_there_is_no_join_when_there_is_none():
     for job in (SKEWED, BALANCED):
@@ -405,7 +412,7 @@ def check_the_schedule_line_prints_the_round_count_and_then_the_last_rounds_widt
     reading the wrong end of it looks right on all three."""
     lines = layout.layout_lines(_app(JOIN))
     schedule = [line for line in lines if "rounds of" in line]
-    assert len(schedule) == 3
+    assert len(schedule) == 2
     assert all("4 rounds of 2 slots, 2 in the last" in line for line in schedule)
 
 def check_a_part_filled_last_round_is_printed_as_its_real_width():
@@ -435,31 +442,37 @@ def check_the_two_aggregate_logs_have_nothing_worth_changing():
         app = _app(job)
         assert layout.actionable(app) == 0
 
-def check_the_join_log_counts_two_partition_targets_and_one_broadcast():
+def check_the_join_log_counts_one_partition_target_and_one_broadcast():
     """Pinned as an arithmetic total rather than as a truthy flag. An exit status cannot
-    tell three from one, so a rule that double counted would look correct from outside."""
-    app = _app(JOIN)
-    assert layout.actionable(app) == 3
+    tell two from one, so a rule that double counted would look correct from outside.
 
-def check_an_advisory_the_current_count_already_satisfies_drops_that_exchange():
-    """Moving the advisory number has to move the count, or the count is not computed
-    from it. 21000000 bytes a partition is what 163272682 over 8 asks for, so the large
-    exchange stops being advice and the small one and the broadcast stay."""
+    It did double count. Both hash exchanges are the same `spark.sql.shuffle.partitions`
+    and each was sized and counted on its own, so this read 3.
+    """
     app = _app(JOIN)
-    assert layout.actionable(app, advisory=21000000) == 2
+    assert layout.actionable(app) == 2
+
+def check_an_advisory_the_current_count_already_satisfies_drops_that_decision():
+    """Moving the advisory number has to move the count, or the count is not computed
+    from it. 21000000 bytes a partition over 8 partitions is 168000000, which is above the
+    163275083 the join's two exchanges wrote between them, so the one partition target
+    stops being advice and the broadcast is what is left."""
+    app = _app(JOIN)
+    assert layout.actionable(app, advisory=21000000) == 1
 
 def check_an_advisory_above_the_whole_shuffle_still_leaves_the_slot_floor():
     """The volume stops arguing and the slots do not. Eight partitions on two slots is
-    four rounds for a shuffle that wants one partition, so both counts are still advice."""
+    four rounds for a shuffle that wants one partition, so the count is still advice and
+    so is the broadcast."""
     app = _app(JOIN)
-    assert layout.actionable(app, advisory=10 ** 12) == 3
+    assert layout.actionable(app, advisory=10 ** 12) == 2
 
-def check_a_threshold_below_the_small_side_leaves_only_the_partition_targets():
+def check_a_threshold_below_the_small_side_leaves_only_the_partition_target():
     app = _app(JOIN)
-    assert layout.actionable(app, threshold=1) == 2
+    assert layout.actionable(app, threshold=1) == 1
 
 def check_the_count_is_printed_rather_than_left_as_an_exit_status():
-    assert any("3 worth changing" in line for line in layout.layout_lines(_app(JOIN)))
+    assert any("2 worth changing" in line for line in layout.layout_lines(_app(JOIN)))
     for job in (SKEWED, BALANCED):
         assert any("0 worth changing" in line for line in layout.layout_lines(_app(job)))
 
@@ -520,7 +533,7 @@ def check_the_plan_text_count_is_reported_against_the_driver_count():
     """Two independent readings of one number. Quoting one without the other throws away
     a control that was sitting next to it."""
     lines = layout.layout_lines(_app(JOIN))
-    assert sum(1 for line in lines if "plan text     agrees at 8" in line) == 3
+    assert sum(1 for line in lines if "plan text     agrees at 8" in line) == 2
 
 def check_a_disagreement_between_the_two_counts_is_said_out_loud():
     """The agreeing case is the only one the logs reach, so the disagreeing branch is
@@ -546,11 +559,17 @@ def check_the_plan_text_carrying_no_count_checks_nothing():
     assert any("carries no count, so it checks nothing" in line for line in lines)
 
 def check_the_target_count_is_reported_with_the_rounds_it_buys():
-    """The count is the advice and the rounds are what it buys. Both targets on the join
-    log save rounds, and a reader given the count alone does this arithmetic themselves."""
+    """The count is the advice and the rounds are what it buys, and a reader given the
+    count alone does this arithmetic themselves.
+
+    One target on the join log now, and the round count it saves is the pair's. The second
+    line this used to assert read `1 round rather than 4 rounds`, which came off sizing the
+    2401 byte side of the join on its own. Nobody could ever have set that count without
+    unsetting the other, so the rounds it promised were not available either.
+    """
     lines = layout.layout_lines(_app(JOIN))
     assert any("schedule after 2 rounds rather than 4 rounds" in line for line in lines)
-    assert any("schedule after 1 round rather than 4 rounds" in line for line in lines)
+    assert sum(1 for line in lines if "schedule after" in line) == 1
 
 def check_a_single_round_is_not_printed_as_a_plural():
     assert layout._rounds(1) == "1 round"
@@ -706,14 +725,14 @@ def check_withholding_takes_the_count_out_of_the_actionable_total():
     """Three on the skewed join log before the guard, and the two that went are the cuts.
     What is left is the broadcast candidate."""
     assert layout.actionable(_app(SKEWED_JOIN)) == 1
-    assert layout.actionable(_app(JOIN)) == 3
+    assert layout.actionable(_app(JOIN)) == 2
 
 def check_the_report_prints_the_arithmetic_it_is_refusing_to_recommend():
     """Hiding the number would read as the tool having nothing to say, and what it has to
     say is that it measured this."""
     lines = layout.layout_lines(_app(SKEWED_JOIN))
     withheld = [line for line in lines if "40 to 52 percent slower" in line]
-    assert len(withheld) == 2, withheld
+    assert len(withheld) == 1, withheld
     assert all("asks for 2 rather than 8" in line for line in withheld)
     assert any("one key is most of the rows" in line for line in lines)
     assert not any("schedule after" in line for line in lines)
@@ -763,7 +782,9 @@ def check_the_uncounted_hash_would_have_been_refused_by_the_old_origin_rule():
     # `changeable` rather than `origin`, because the flag is a field on the exchange that
     # `shuffles` fills in from the plan. Replacing the origin here would leave the flag
     # alone and the check would pass while testing nothing.
-    refused = dataclasses.replace(hashed, changeable=False)
+    refused = dataclasses.replace(hashed, changeable=False,
+                                  origin=plan.CHOSEN_BY_HAND)
+    assert refused.origin_kind == plan.QUERY
     assert layout.size(refused, app.slots).target is None
     assert "does not decide it" in layout.size(refused, app.slots).why
     # And the flag does come from the origin, which is the join the fix travels through.
@@ -776,3 +797,259 @@ def check_advice_is_frozen():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("Advice accepted an assignment")
+
+# One partition count, however many exchanges it controls
+#
+# `spark.sql.shuffle.partitions` is one number and a sort merge join shuffles both sides
+# by the same key into the same number of pieces. Sizing the sides apart gave the join log
+# two targets for that one number, and they were not the same target.
+
+ALL_JOBS = ("skewed", "balanced", "join", "skewed_join", "by_column",
+            "by_column_at_5", "small", "wide")
+
+def _decisions(job):
+    app = _app(job)
+    return app, [d for info in app.plans
+                 for d in layout.decisions(app, plan.read(info))]
+
+def _with_one_count_changed(job, value):
+    """The join log with one hash exchange's driver reported partition count altered.
+
+    Built rather than captured. Two exchanges the config decides that feed one stage
+    cannot really disagree about the count, which is the premise the grouping rests on,
+    so the only way to exercise the premise failing is to break it on purpose.
+    """
+    app = _app(job)
+    root = plan.read(app.plans[0])
+    hashed = [node for node in plan.exchanges(root)
+              if plan.partitioning(node).scheme == layout.KEY_HASH]
+    assert len(hashed) == 2, hashed
+    acc_id = hashed[1].metrics[layout.PARTITION_COUNT]
+    changed = dict(app.accumulators)
+    changed[acc_id] = str(value)
+    return type(app)(**dict(app.__dict__, accumulators=changed))
+
+def check_the_two_sides_of_one_join_are_one_decision():
+    for job in ("join", "skewed_join"):
+        app, found = _decisions(job)
+        assert len(found) == 2, (job, found)
+        shared = [d for d in found if len(d.shuffles) > 1]
+        assert len(shared) == 1, (job, shared)
+        assert shared[0].stage_id == 3, (job, shared[0])
+        assert all(s.scheme == layout.KEY_HASH for s in shared[0].shuffles)
+        assert all(s.origin == plan.CHOSEN_BY_SPARK for s in shared[0].shuffles)
+
+def check_sizing_each_side_apart_gives_two_targets_for_one_number():
+    """The defect, as the two numbers rather than as the grouping.
+
+    Both exchanges come from `spark.sql.shuffle.partitions` and feed stage 3, so the
+    report was asking for 4 and for 2 at once. Taking the second would undo the first.
+    """
+    app, found = _shuffles("join")
+    hashed = [s for s in found if s.scheme == layout.KEY_HASH]
+    assert len(hashed) == 2
+    apart = sorted(layout.size(s, app.slots).target for s in hashed)
+    assert apart == [2, 4], apart
+    together = layout.size_of(tuple(hashed), app.slots)
+    assert together.target == 4, together
+
+def check_a_decision_sizes_the_sum_of_the_exchanges_it_controls():
+    """Recomputed from the two byte counts rather than asserted as one figure."""
+    app, found = _decisions("join")
+    shared = [d for d in found if len(d.shuffles) > 1][0]
+    written = sorted(s.written for s in shared.shuffles)
+    assert written == [2401, 163272682], written
+    assert layout.volume(shared.shuffles) == sum(written) == 163275083
+    sizing = layout.size_of(shared.shuffles, app.slots)
+    assert sizing.from_volume == math.ceil(sum(written) / layout.ADVISORY_BYTES) == 3
+    assert str(sum(written)) in sizing.why
+
+def check_a_count_the_query_names_never_shares_a_decision():
+    """The control on what makes two exchanges one count.
+
+    Two `repartition` arguments feeding one stage are two numbers typed in two places, so
+    they stay apart however the plan arranges them. Asserted by moving the origin on an
+    exchange that does group, because the discriminator is the origin and nothing else.
+    """
+    app = _app("join")
+    hashed = _hash_exchange("join")
+    assert layout._decides_with(app, hashed) == 3
+    for origin in (plan.CHOSEN_BY_HAND, "REPARTITION_BY_SOMETHING_NEW", ""):
+        moved = dataclasses.replace(hashed, origin=origin)
+        assert layout._decides_with(app, moved) is None, origin
+
+def check_an_exchange_whose_reading_stage_is_unknown_stands_alone():
+    """Grouping on a stage nothing identified would be grouping on a guess, and the two
+    exchanges it merged would lose their separate byte counts for no checkable reason."""
+    app = _app("join")
+    orphan = dataclasses.replace(_hash_exchange("join"), written=400000000)
+    assert layout.reading_stage(app, orphan) is None
+    assert layout._decides_with(app, orphan) is None
+
+def check_a_decision_whose_members_disagree_on_the_count_comes_back_apart():
+    """The premise is that the count is shared. A disagreement falsifies it, so the two
+    exchanges print separately rather than being sized against a number neither has."""
+    app = _with_one_count_changed("join", 4)
+    found = layout.decisions(app, plan.read(app.plans[0]))
+    assert len(found) == 3, found
+    assert all(len(d.shuffles) == 1 for d in found), found
+    assert all(d.stage_id is None for d in found), found
+    # The control. The same application with the count left alone does group.
+    assert any(len(d.shuffles) == 2 for d in _decisions("join")[1])
+
+def check_the_aggregate_logs_group_nothing():
+    """Six of the eight committed logs have no join, and grouping must not touch them.
+
+    Without this the fix could be collapsing exchanges all over the tree and every check
+    above would still pass, because the two join logs are the only ones it reads.
+    """
+    for job in ("skewed", "balanced", "by_column", "by_column_at_5", "small", "wide"):
+        app, found = _decisions(job)
+        assert all(len(d.shuffles) == 1 for d in found), job
+        assert all(d.stage_id is None for d in found), job
+
+def check_every_exchange_keeps_its_own_byte_line():
+    """The report is a reading of the log as well as a recommendation. One count is one
+    decision and two exchanges are still two measurements."""
+    lines = layout.layout_lines(_app("join"))
+    assert any("bytes         163272682 measured" in line for line in lines)
+    assert any("bytes         2401 measured" in line for line in lines)
+    assert any("bytes         163275083 measured in total" in line for line in lines)
+
+def check_the_withheld_cut_is_one_line_and_names_its_stage_once():
+    """What the duplication actually looked like.
+
+    The reason names the hot key on the stage the count divides. Both sides feed that one
+    stage, so printing it per exchange stated one finding twice and hung the large side's
+    44.2 ratio next to a 2401 byte exchange that has no key distribution to speak of.
+    """
+    lines = layout.layout_lines(_app("skewed_join"))
+    reasons = [line for line in lines if "one key is most of the rows" in line]
+    assert len(reasons) == 1, reasons
+    assert "stage 3 reads 44.2 on records_read" in reasons[0]
+    assert sum(1 for line in lines if "40 to 52 percent slower" in line) == 1
+
+def check_per_partition_divides_the_whole_decision():
+    app, found = _decisions("skewed_join")
+    shared = [d for d in found if len(d.shuffles) > 1][0]
+    assert layout._per_partition(shared.shuffles) == 88790439 / 8
+    lines = layout.layout_lines(app)
+    assert any("per partition 11098805 measured bytes each" in line for line in lines)
+
+def check_a_decision_missing_one_exchange_s_bytes_refuses_rather_than_summing_the_rest():
+    """A sum that drops a missing term is a smaller number and not an unknown one, and
+    small is the direction that reads as a confident answer."""
+    present = _hash_exchange("join")
+    absent = dataclasses.replace(present, written=None)
+    assert layout.volume((present, absent)) is None
+    sizing = layout.size_of((present, absent), 2)
+    assert sizing.target is None
+    assert sizing.from_volume is None
+    assert "no shuffle bytes" in sizing.why
+    assert layout._per_partition((present, absent)) is None
+
+# The origin list, and the fourth origin nobody has seen
+#
+# `plan.CONFIG_DECIDED` is two names and membership used to be the whole test, so an
+# origin on neither list came back as a count the config does not decide. That sentence is
+# a claim about the query, and it is what `REPARTITION_BY_COL` got for two days.
+
+def check_every_origin_in_every_committed_log_is_one_this_repo_reads():
+    """The completeness report, which is the most a log can give.
+
+    Nothing in an event log states which origins Spark can write, so there is no check to
+    run against the data. What there is instead is this: every origin the committed logs
+    carry is named, and the count is published rather than implied.
+    """
+    seen = {}
+    for job in ALL_JOBS:
+        _app_, found = _decisions(job)
+        for decision in found:
+            for shuffle in decision.shuffles:
+                seen[shuffle.origin] = seen.get(shuffle.origin, 0) + 1
+    assert sorted(seen) == sorted(plan.CONFIG_DECIDED + plan.QUERY_DECIDED), seen
+    assert set(seen) == set(plan.KNOWN_ORIGINS), seen
+    assert all(plan.origin_kind(origin) != plan.UNRECOGNISED for origin in seen)
+    # Three names over the eight logs, and the one the fix added is the rarest of them.
+    assert seen[plan.ASKED_BY_KEY] == 2, seen
+    assert seen[plan.CHOSEN_BY_SPARK] == 4, seen
+
+def check_an_unrecognised_origin_is_not_reported_as_a_query_argument():
+    """The sentence this split exists to stop.
+
+    A gap in this repo printed as a fact about somebody's query. The refusal still refuses,
+    which is the right default, and it no longer says why in words that are not true.
+    """
+    unknown = dataclasses.replace(_hash_exchange("join"),
+                                  origin="REBALANCE_PARTITIONS_BY_NONE", changeable=False)
+    assert unknown.origin_kind == plan.UNRECOGNISED
+    why = layout.size(unknown, 2).why
+    assert "whether the config decides this count is unknown" in why, why
+    assert "argument in the query" not in why, why
+    assert layout.size(unknown, 2).target is None
+
+def check_an_exchange_with_no_origin_in_the_plan_text_says_that():
+    """`partitioning` leaves the origin empty when the node's simple string carries one
+    field. Naming the empty string back at the reader is not an explanation."""
+    blank = dataclasses.replace(_hash_exchange("join"), origin="", changeable=False)
+    assert blank.origin_kind == plan.UNRECOGNISED
+    why = layout.size(blank, 2).why
+    assert why.startswith("the plan text names no origin"), why
+
+def check_the_flag_and_the_origin_disagreeing_is_said_out_loud():
+    """`changeable` is what the branch is taken on and `origin` is what it came from.
+
+    They are separate fields because a copy is where two readings of one fact drift apart.
+    A message built from the origin alone reports the drift as a fact about the query.
+    """
+    drifted = dataclasses.replace(_hash_exchange("join"), changeable=False)
+    assert drifted.origin_kind == plan.CONFIG
+    why = layout.size(drifted, 2).why
+    assert "the two readings of one fact disagree" in why, why
+    assert "argument in the query" not in why, why
+
+def check_an_unrecognised_origin_is_not_config_decided():
+    """The quiet direction is the dangerous one here. An origin nobody recognises must not
+    fall into the list that produces advice either."""
+    for origin in ("REBALANCE_PARTITIONS_BY_COL", "", "ensure_requirements"):
+        assert not plan.partitioning_is_config_decided(origin), origin
+        assert plan.origin_kind(origin) == plan.UNRECOGNISED, origin
+
+def check_a_decision_is_frozen():
+    """`Advice` has this and `Decision` did not, and a mutant turning it off survived."""
+    decision = layout.Decision(shuffles=(), stage_id=None)
+    try:
+        decision.stage_id = 3
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("Decision accepted an assignment")
+
+def check_a_lone_exchange_prints_one_byte_line_and_no_total():
+    """A total over one number is the number, and restating it reads as a second
+    measurement.
+
+    This is the check that was missing. A mutant widening the guard on the total line put
+    a `measured in total` line under every lone exchange in six of the eight logs, and all
+    380 checks passed with it, because nothing here asserted the shape of the block rather
+    than the presence of its parts.
+    """
+    for job in ("balanced", "skewed", "small", "by_column", "by_column_at_5"):
+        lines = layout.layout_lines(_app(job))
+        assert not any("measured in total" in line for line in lines), job
+        assert sum(1 for line in lines if "      bytes " in line) == 2, job
+    # Three byte lines on the join log. One per exchange and one for the pair.
+    for job in ("join", "skewed_join"):
+        lines = layout.layout_lines(_app(job))
+        assert sum(1 for line in lines if "      bytes " in line) == 4, job
+        assert sum(1 for line in lines if "measured in total" in line) == 1, job
+
+def check_a_group_of_one_never_reaches_the_disagreement_branch():
+    """Why the length guard in front of it was deleted rather than kept.
+
+    One exchange carries one count, so the set of counts holds one element whatever that
+    count is, including None. Both readings of a length comparison in front of this are
+    the same function, which is a site nothing can grade.
+    """
+    for partitions in (8, None, 0):
+        lone = dataclasses.replace(_hash_exchange("join"), partitions=partitions)
+        assert len({s.partitions for s in (lone,)}) == 1, partitions
