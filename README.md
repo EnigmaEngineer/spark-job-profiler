@@ -491,11 +491,14 @@ stage model can tell a shuffle a broadcast would remove from one that nothing wo
 python -m sjp layout tests/fixtures/eventlogs/join/local-*
 local-1790609373067  sjp-join  2 cores  1.0 cpus a task  2 slots
   hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
+      exchanges     2 into stage 3, and one count decides them
       bytes         163272682 measured  832000000 estimated
+      bytes         2401 measured  4776 estimated
+      bytes         163275083 measured in total, which is what the count divides
       plan text     agrees at 8
-      per partition 20409085 measured bytes each
+      per partition 20409385 measured bytes each
       schedule      4 rounds of 2 slots, 2 in the last
-      partitions    4 rather than 8. 163272682 bytes at an advisory 67108864 wants 3, and the 2 slots round it to 4
+      partitions    4 rather than 8. 163275083 bytes at an advisory 67108864 wants 3, and the 2 slots round it to 4
       schedule after 2 rounds rather than 4 rounds
   RoundRobinPartitioning into 8 partitions  chosen by REPARTITION_BY_NUM
       bytes         42048255 measured  128000000 estimated
@@ -503,18 +506,11 @@ local-1790609373067  sjp-join  2 cores  1.0 cpus a task  2 slots
       per partition 5256032 measured bytes each
       schedule      4 rounds of 2 slots, 2 in the last
       partitions    none. REPARTITION_BY_NUM is an argument in the query, so the config does not decide it
-  hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
-      bytes         2401 measured  4776 estimated
-      plan text     agrees at 8
-      per partition 300 measured bytes each
-      schedule      4 rounds of 2 slots, 2 in the last
-      partitions    2 rather than 8. 2401 bytes at an advisory 67108864 wants 1, and the 2 slots round it to 2
-      schedule after 1 round rather than 4 rounds
   large side of SortMergeJoin  leave it shuffled
       why           832000000 estimated, which is over the 10485760 threshold
   small side of SortMergeJoin  broadcast it
       why           4776 estimated against a 10485760 threshold, and the other side shuffled 163272682
-  3 worth changing
+  2 worth changing
 ```
 
 ### There are two sizes and they answer different questions
@@ -791,9 +787,12 @@ either way.
 python -m sjp layout tests/fixtures/eventlogs/skewed_join/local-*
 local-1790780305543  sjp-skewed_join  2 cores  1.0 cpus a task  2 slots
   hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
+      exchanges     2 into stage 3, and one count decides them
       bytes         88788038 measured  768000000 estimated
+      bytes         2401 measured  4776 estimated
+      bytes         88790439 measured in total, which is what the count divides
       plan text     agrees at 8
-      per partition 11098505 measured bytes each
+      per partition 11098805 measured bytes each
       schedule      4 rounds of 2 slots, 2 in the last
       partitions    none. the volume asks for 2 rather than 8, and taking that cut was measured here to leave the stage wall alone and make the largest task 40 to 52 percent slower
       why           stage 3 reads 44.2 on records_read, so one key is most of the rows and a hash keeps it on one partition at any count
@@ -803,13 +802,6 @@ local-1790780305543  sjp-skewed_join  2 cores  1.0 cpus a task  2 slots
       per partition 5256032 measured bytes each
       schedule      4 rounds of 2 slots, 2 in the last
       partitions    none. REPARTITION_BY_NUM is an argument in the query, so the config does not decide it
-  hashpartitioning into 8 partitions  chosen by ENSURE_REQUIREMENTS
-      bytes         2401 measured  4776 estimated
-      plan text     agrees at 8
-      per partition 300 measured bytes each
-      schedule      4 rounds of 2 slots, 2 in the last
-      partitions    none. the volume asks for 2 rather than 8, and taking that cut was measured here to leave the stage wall alone and make the largest task 40 to 52 percent slower
-      why           stage 3 reads 44.2 on records_read, so one key is most of the rows and a hash keeps it on one partition at any count
   large side of SortMergeJoin  leave it shuffled
       why           768000000 estimated, which is over the 10485760 threshold
   small side of SortMergeJoin  broadcast it
@@ -825,15 +817,37 @@ the same benchmark measured eight partitions beating three and four on the worst
 The control is the join log, and it is the reason to believe any of this. Same query shape.
 Same two hash exchanges, both `ENSURE_REQUIREMENTS`, both cut by the same arithmetic. Its
 reading stage reads 1.22 on rows against the skewed join's 44.21, so the guard stays quiet
-and the join log still reports 3 worth changing while the skewed join reports 1. The two
-that went are the cuts and what is left is the broadcast candidate.
+and the join log reports 2 worth changing while the skewed join reports 1. The cut that
+went is the one the guard withheld and what is left on the skewed join is the broadcast
+candidate.
 
-One thing this surfaced that was not the point of it. Both hash exchanges on the skewed
-join are withheld, and the report was treating them as two independent recommendations.
-They are not. A sort merge join partitions both sides by the same key into the same number
-of pieces, so the two exchanges are one knob and `spark.sql.shuffle.partitions` is the
-knob. The report still prints a line per exchange, which is right for reading the log and
-wrong for counting the advice.
+## One count, two exchanges, and the two answers it used to give
+
+A sort merge join partitions both sides by the same key into the same number of pieces.
+`spark.sql.shuffle.partitions` is one number, so the two hash exchanges under the join are
+one decision. Sizing them apart is what this used to do, and on the join log it did not
+just count one thing twice. It gave two different answers to one question.
+
+The large side wrote 163,272,682 bytes and asked for 4 partitions. The small side wrote
+2,401 and asked for 2. Both numbers came out of the same config key. Taking the second
+would have unset the first, and the report printed `schedule after 1 round rather than 4
+rounds` beside a count nobody could have set on its own.
+
+Grouping them fixes the arithmetic as well as the count. The volume a partition count
+divides is what lands in the stage it feeds, which is both sides, so the sum is what gets
+sized. 163,275,083 bytes still asks for 4 on this log, because the small side is four
+orders of magnitude down and does not move the ceiling. The answer did not change here.
+What changed is that there is one of it.
+
+On the skewed join the duplication was louder. Both exchanges were withheld and both
+printed the same reason, and that reason names a hot key on stage 3, which is the stage
+both sides feed. So a 2,401 byte exchange carried a sentence about 44.2 times the median
+row count, measured on the other side of the join. One finding, stated twice, attached
+once to something it was not about.
+
+Each exchange keeps its own byte line. Those are two measurements and the report is a
+reading of the log as well as a recommendation. What prints once is the count, the
+schedule and the advice, because there is one of each.
 
 ## The third origin, and the advice it was throwing away
 
@@ -849,6 +863,37 @@ when a join demands the partitioning. Spark records that as `REPARTITION_BY_COL`
 one name rule it fell through to not changeable, so the tool refused to advise on an exchange
 it could advise on and printed that the config does not decide a count the config decides.
 Wrong in the quiet direction, because a refusal reads as caution.
+
+### A fourth origin now says it is a fourth origin
+
+Adding the third name to the list fixed that one exchange and left the shape of the rule
+alone. Membership of a two name list was still the whole test, so anything Spark writes
+that is not on it came back as a count the config does not decide. That sentence is a
+claim about somebody's query. It is not what a missing name means.
+
+There are two lists now and three answers. One holds the origins the config decides, one
+holds the origins the query names, and an origin on neither is reported as an origin this
+tool has no reading for. The refusal is the same, which is the right default. The reason
+printed beside it is no longer a guess dressed as a reading.
+
+What it used to print, measured by handing the old code an origin Spark really does write
+and this repo has never captured:
+
+| origin handed to it | what it printed before | what it prints now |
+| --- | --- | --- |
+| `REBALANCE_PARTITIONS_BY_NONE` | is an argument in the query, so the config does not decide it | is not an origin this tool has a reading for, so whether the config decides this count is unknown |
+| nothing, an exchange whose plan text carries one field | is an argument in the query, so the config does not decide it | the plan text names no origin, so whether the config decides this count is unknown |
+| `ENSURE_REQUIREMENTS`, flagged as not the config's | is an argument in the query, so the config does not decide it | is an origin the config decides and this exchange is flagged otherwise, so the two readings of one fact disagree |
+
+The third row is the one worth looking at twice. `changeable` is a flag copied onto the
+exchange and `origin` is what it was copied from, and the message was built from the origin
+while the branch was taken on the flag. So the one shape where the two disagree printed a
+sentence contradicting the name in its own first word.
+
+There is still no check that the list is complete, and there cannot be one off a log.
+Nothing an event log holds says what origins Spark can write. What there is instead is a
+check that every origin the eight committed logs carry is a name this repo reads, with the
+count of each published rather than implied.
 
 Nothing in the first three logs reached it, which is why no check caught it. The fifth sample
 job exists to reach it.
@@ -1071,21 +1116,22 @@ stderr stayed empty.
 
 ```
 python tests/run_all.py
-360 passed, 0 failed, 360 checks
+383 passed, 0 failed, 383 checks
 ```
 
-Every check is graded by a mutation pass rather than counted. The three modules day 2
-touched were re-run on 2026-10-03 and the other nine rows are from earlier passes.
+Every check is graded by a mutation pass rather than counted. `sjp/layout.py`,
+`sjp/plan.py` and `sjp/commands.py` were re-run after the grouping change and the other
+nine rows are from earlier passes.
 
 ```
-sjp/layout.py: 87 mutation sites, running 0 to 87
-87 killed, 0 survived, 0 ungraded, 87 graded
+sjp/layout.py: 114 mutation sites, running 0 to 114
+114 killed, 0 survived, 0 ungraded, 114 graded
 sjp/bench.py: 38 mutation sites, running 0 to 38
 34 killed, 4 survived, 0 ungraded, 38 graded
 sjp/model.py: 44 mutation sites, running 0 to 44
 44 killed, 0 survived, 0 ungraded, 44 graded
-sjp/plan.py: 30 mutation sites, running 0 to 30
-30 killed, 0 survived, 0 ungraded, 30 graded
+sjp/plan.py: 33 mutation sites, running 0 to 33
+33 killed, 0 survived, 0 ungraded, 33 graded
 sjp/commands.py: 31 mutation sites, running 0 to 31
 31 killed, 0 survived, 0 ungraded, 31 graded
 sjp/skew.py: 31 mutation sites, running 0 to 31
@@ -1229,16 +1275,20 @@ time kept one of its four separations. Read a separated verdict here as a direct
 re-running rather than as a settled number, and read an undecided one as carrying almost no
 information at this sample size.
 
-The guard that withholds a cut counts the exchanges it withholds on separately, and on a sort
-merge join they are not separate. Both sides are partitioned by the same key into the same
-number of pieces, so the two exchanges are one knob and `spark.sql.shuffle.partitions` is the
-knob. The report prints a line for each, which is right for reading the log and wrong for
-counting the advice.
+Closed in v2. The exchanges one partition count controls are grouped and counted once, and
+an origin this repo has never seen is reported as unrecognised rather than as a number
+somebody typed. Two things about that are worth keeping in view.
 
-The origins that read as config decided are a list of two names. A fourth origin would fall
-through to not changeable and be refused in silence, which is exactly how the third one was
-missed. The list is the whole test and there is no check that it is complete, because nothing
-in a log says what origins Spark can write.
+Grouping rests on two exchanges feeding one stage, and the stage is found by matching an
+exchange's measured bytes against a stage total. An exchange whose bytes match no stage has
+no reading stage. Neither does one whose bytes match two. Either way it is left on its own
+and sized alone, which is a refusal rather than an error and it is silent. A log where it
+happened would be counted the old way with nothing saying so.
+
+The origin list still has no completeness check and cannot have one, because nothing in an
+event log states what origins Spark can write. What is checked is that every origin the
+eight committed logs carry is one this repo reads. A ninth log could carry a tenth name and
+the only thing that would say so is the report itself.
 
 The millisecond floor of 50 sits in a gap the two logs leave and its position inside that gap
 is a judgement. The sweep from 0 to 3041 is published above so the headline count reads as a
