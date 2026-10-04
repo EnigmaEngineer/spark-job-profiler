@@ -45,9 +45,37 @@ CHOSEN_BY_HAND = "REPARTITION_BY_NUM"
 # 5)` and at 8 writes 8, both with this origin.
 ASKED_BY_KEY = "REPARTITION_BY_COL"
 
-# The origins whose count `spark.sql.shuffle.partitions` decides. Membership is the whole
-# test, so a fourth origin arriving is a decision rather than a default.
+# The origins whose count `spark.sql.shuffle.partitions` decides.
 CONFIG_DECIDED = (CHOSEN_BY_SPARK, ASKED_BY_KEY)
+
+# The origins whose count the query names outright, so no config change moves it.
+QUERY_DECIDED = (CHOSEN_BY_HAND,)
+
+# Every origin this module has a reading for. Membership of `CONFIG_DECIDED` used to be
+# the whole test, so an origin on neither list came back as a count the config does not
+# decide. That is a claim about the query rather than an admission of not knowing, and it
+# is how `REPARTITION_BY_COL` was read wrongly for two days. An origin on no list now says
+# that, and nothing in an event log states which origins Spark can write, so the third
+# answer is the only honest one available.
+KNOWN_ORIGINS = CONFIG_DECIDED + QUERY_DECIDED
+
+CONFIG = "config"
+QUERY = "query"
+UNRECOGNISED = "unrecognised"
+
+
+def origin_kind(origin):
+    """Who decides the partition count on this origin, or that nothing here knows.
+
+    Three answers rather than two. The two lists are read off Spark's own origin names and
+    neither of them is derived from anything in the log, so a name on neither is a gap in
+    this module and not a fact about the query.
+    """
+    if origin in CONFIG_DECIDED:
+        return CONFIG
+    if origin in QUERY_DECIDED:
+        return QUERY
+    return UNRECOGNISED
 
 
 def partitioning_is_config_decided(origin):
@@ -57,7 +85,7 @@ def partitioning_is_config_decided(origin):
     exists because the flag is copied onto other records and a copy is where the two can
     drift apart.
     """
-    return origin in CONFIG_DECIDED
+    return origin_kind(origin) == CONFIG
 
 
 class UnreadablePlan(Exception):
@@ -157,6 +185,16 @@ class Partitioning:
         it could advise on, and said the config does not decide a count the config decides.
         """
         return partitioning_is_config_decided(self.origin)
+
+    @property
+    def kind(self):
+        """Which of the three readings this origin gets.
+
+        `changeable` collapses the unrecognised case into the query case, because it is a
+        boolean and has nowhere else to put it. A caller that needs to tell a refusal from
+        a gap asks here instead.
+        """
+        return origin_kind(self.origin)
 
 
 def partitioning(node):

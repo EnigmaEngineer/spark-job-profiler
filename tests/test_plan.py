@@ -280,3 +280,47 @@ def check_an_empty_argument_list_declares_no_count_rather_than_raising():
     how = plan.partitioning(node)
     assert how.scheme == "somepartitioning"
     assert how.declared is None
+
+# The three readings of an origin, and the gap that used to be invisible
+
+def check_origin_kind_answers_three_ways_and_the_lists_do_not_overlap():
+    """Two names deciding one boolean left nowhere to put an origin nobody has read.
+
+    The overlap assertion is the part worth keeping. The same name on both lists would
+    make `origin_kind` answer by list order, which is an answer nothing argues for.
+    """
+    assert plan.origin_kind(plan.CHOSEN_BY_SPARK) == plan.CONFIG
+    assert plan.origin_kind(plan.ASKED_BY_KEY) == plan.CONFIG
+    assert plan.origin_kind(plan.CHOSEN_BY_HAND) == plan.QUERY
+    assert plan.origin_kind("REBALANCE_PARTITIONS_BY_COL") == plan.UNRECOGNISED
+    assert not set(plan.CONFIG_DECIDED) & set(plan.QUERY_DECIDED)
+    assert len(plan.KNOWN_ORIGINS) == len(set(plan.KNOWN_ORIGINS)) == 3
+
+def check_the_boolean_is_derived_from_the_kind_rather_than_kept_beside_it():
+    """Two tests of one fact drift. This is the one place they are tied together."""
+    for origin in plan.KNOWN_ORIGINS + ("REPARTITION_BY_NOTHING", "", "x"):
+        assert plan.partitioning_is_config_decided(origin) is (
+            plan.origin_kind(origin) == plan.CONFIG), origin
+
+def check_a_partitioning_reports_its_own_origin_kind():
+    """Reachable off the record as well as off the bare name, because `Partitioning` is
+    what `sjp.layout` is handed and a caller should not have to reach past it."""
+    for job in (JOIN, SKEWED_JOIN):
+        app = eventlog.profile(_only_log(job))
+        root = plan.read(app.plans[0])
+        kinds = [plan.partitioning(node).kind for node in plan.exchanges(root)]
+        assert kinds.count(plan.CONFIG) == 2, (job, kinds)
+        assert kinds.count(plan.QUERY) == 1, (job, kinds)
+        assert plan.UNRECOGNISED not in kinds, (job, kinds)
+
+def check_an_unrecognised_origin_is_refused_rather_than_read_as_either_answer():
+    """A fourth origin arriving is the case this exists for, and no log carries one, so
+    the record is built. The old rule answered this exactly as it answered a typed count.
+    """
+    node = plan.Node(name=plan.EXCHANGE, metrics={}, children=(),
+                     simple="Exchange hashpartitioning(key#4, 8), REBALANCE_PARTITIONS_BY_COL")
+    how = plan.partitioning(node)
+    assert how.origin == "REBALANCE_PARTITIONS_BY_COL"
+    assert how.declared == 8
+    assert how.kind == plan.UNRECOGNISED
+    assert how.changeable is False
