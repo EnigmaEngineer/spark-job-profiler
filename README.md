@@ -387,9 +387,22 @@ skewed verdicts on the skewed log by floor: {0: 11, 30: 8, 50: 8, 100: 7, 3041: 
 Every floor from 30 to 71 gives the same answer, which is what a gap means. Where in that gap
 the number goes is a judgement and not a measurement, so the sweep is published beside it.
 
-Bytes and counts have no floor. Neither log produces a byte or a record verdict small enough
-to be noise, so nothing here measures where that floor belongs, and `None` means no floor
-rather than a number invented to fill the row.
+Bytes and counts are bracketed by two fixtures rather than by one, because every log here
+measured bytes in the tens of millions until a 600 row capture populated the small end. Both
+floors are derived from their bracket rather than typed. The derivation and what it does not
+settle are in `docs/adr-0006`.
+
+```
+bytes  noise       7449  real   59191004  span   7946x
+count  noise        518  real    6932663  span  13383x
+bytes  floor     700000  which is   93x the noise end and a 84th of the real
+count  floor      60000  which is  115x the noise end and a 115th of the real
+```
+
+The 600 row log also falsified the millisecond bracket above, which it was not captured to
+test. One of its tasks runs 556 milliseconds on 600 rows, so the largest millisecond value
+that is noise is eight times 71, the smallest anything here calls real. That bracket is
+inverted and the derivation refuses it, so the millisecond floor stays the hand placed 50.
 
 ### One worst stage was the metric order in disguise
 
@@ -1024,10 +1037,10 @@ The two at the top are correct and useless. 7,449 bytes really is 9.4 times 793 
 
 The millisecond floor was placed on evidence. The sweep `{0: 11, 30: 8, 50: 8, 100: 7,
 3041: 6}` is published further up this file, and 50 sits inside a gap where every value
-gives the same answer. The byte and count floors have no equivalent, because until the
-`small` capture every log here measured bytes in the tens of millions. The skewed join's key exchange writes
-88,788,038 of them. This stage reads 7,449. Four orders of magnitude apart and judged by the
-same rule.
+gives the same answer. The byte and count floors had no equivalent, because until this
+capture every log here measured bytes in the tens of millions. The skewed join's key
+exchange writes 88,788,038 of them. This stage reads 7,449. Four orders of magnitude apart
+and judged by the same rule.
 
 The byte and record figures came off the deterministic half of the log and reproduced
 across two separate captures to the record and to the byte. The two `executor_run_time`
@@ -1035,7 +1048,95 @@ lines did not, because they are timings, so nothing pins them.
 
 The floors are not set here. Setting a floor on the first log that ever populated the small
 end, on the same day that log was captured, is how the millisecond floor would have been
-placed badly.
+placed badly. They are set in the section below, three days later.
+
+### The floors, and what a bracket four orders of magnitude wide cannot decide
+
+`scripts/floor_probe.py` reads both ends of both brackets off the committed logs and runs
+four controls over what the floors change.
+
+```
+brackets re-derived from the logs
+  bytes  noise       7449  real   59191004  span   7946x  agrees with skew.BRACKETS
+  count  noise        518  real    6932663  span  13383x  agrees with skew.BRACKETS
+floors derived from them
+  bytes  floor     700000  which is   93x the noise end and a 84th of the real
+  count  floor      60000  which is  115x the noise end and a 115th of the real
+the millisecond floor is not derived
+  millis measured bracket is (556, 71), a noise end above a real end
+  so the floor stays at 50, placed by hand
+```
+
+The floor is the geometric mean of its bracket to one significant figure. A geometric mean
+because these are quantities people compare by ratio, and the arithmetic middle of the byte
+bracket sits within a factor of two of the real end. One significant figure because the
+precision is not there.
+
+The rule returns 50 for the millisecond bracket of 29 to 71, which is the floor that shipped
+weeks before the rule existed. That is one agreement rather than a law.
+
+What makes the magnitude the only thing worth reading is that the ratio is not. The same job
+captured at five row counts moves the record ratio by one percent across four orders of
+magnitude of input, because the ratio is a property of the key distribution and that is
+held. No command prints this table, so it is a table.
+
+| rows | records_read ratio | largest records | local_bytes_read ratio | largest bytes |
+|---|---|---|---|---|
+| 600 | 43.17 | 518 | 9.39 | 7,449 |
+| 6,000 | 43.94 | 5,185 | 22.10 | 68,790 |
+| 60,000 | 44.19 | 51,995 | 31.89 | 727,776 |
+| 600,000 | 44.19 | 519,941 | 34.41 | 7,764,485 |
+| 8,000,000 | 44.22 | 6,932,663 | 34.99 | 109,685,777 |
+
+Rebuild it with
+
+```
+bash -c 'for n in 600 6000 60000 600000 8000000; do python -m sjp capture --job skewed --rows $n --out /tmp/ladder/$n; done'
+```
+
+The sweep is where the honesty is. Every candidate from 10,000 to 59,191,004 gives an
+identical answer on all eight committed logs.
+
+```
+bytes verdicts surviving each candidate floor
+  log                        0       10000      100000      700000    10000000    59191004    60000000
+  balanced                   0           0           0           0           0           0           0
+  by_column                  0           0           0           0           0           0           0
+  by_column_at_5             0           0           0           0           0           0           0
+  join                       0           0           0           0           0           0           0
+  skewed                     4           4           4           4           4           4           4
+  skewed_join                4           4           4           4           4           4           3
+  small                      1           0           0           0           0           0           0
+  wide                       0           0           0           0           0           0           0
+```
+
+The millisecond gap was a factor of 2.4 and it pinned a number. This one is a factor of
+5,919 and the ladder above shows its interior is reachable by choosing a row count, so the
+position inside it is a policy about the smallest job worth commenting on. A 60,000 row job
+spilling 727,776 bytes loses its byte verdict and a 600,000 row job keeps it. At 60,000,000
+the floor starts removing real evidence, which is the only hard edge either bracket has.
+
+The small log before and after.
+
+```
+  4 skewed, 10 even, 28 undecided
+  skewed    stage 2  records_read         43.1667  largest task 518 against a median of 12
+  skewed    stage 2  local_bytes_read      9.3934  largest task 7449 against a median of 793
+  skewed    stage 2  executor_run_time     4.8559  largest task 556 against a median of 114.5
+  skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
+```
+
+```
+  2 skewed, 6 even, 34 undecided
+  skewed    stage 2  executor_run_time     4.8559  largest task 556 against a median of 114.5
+  skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
+```
+
+Two verdicts remain and neither is worth acting on. Both are a duration on a 600 row job,
+and that is the finding this capture produced without being asked. Bytes and records scale
+with the data and a task's wall time does not, because a 600 row task still pays for a JVM,
+a launch and a serialisation. So the millisecond floor under a trivial job is set by fixed
+cost rather than by work, and no magnitude floor separates it from a real pause.
 
 ## The answer goes first now
 
@@ -1116,12 +1217,12 @@ stderr stayed empty.
 
 ```
 python tests/run_all.py
-383 passed, 0 failed, 383 checks
+410 passed, 0 failed, 410 checks
 ```
 
-Every check is graded by a mutation pass rather than counted. `sjp/layout.py`,
-`sjp/plan.py` and `sjp/commands.py` were re-run after the grouping change and the other
-nine rows are from earlier passes.
+Every check is graded by a mutation pass rather than counted. `sjp/skew.py` and
+`jobs/sample.py` were re-run after the floors went in and the other ten rows are from
+earlier passes.
 
 ```
 sjp/layout.py: 114 mutation sites, running 0 to 114
@@ -1134,8 +1235,8 @@ sjp/plan.py: 33 mutation sites, running 0 to 33
 33 killed, 0 survived, 0 ungraded, 33 graded
 sjp/commands.py: 31 mutation sites, running 0 to 31
 31 killed, 0 survived, 0 ungraded, 31 graded
-sjp/skew.py: 31 mutation sites, running 0 to 31
-31 killed, 0 survived, 0 ungraded, 31 graded
+sjp/skew.py: 40 mutation sites, running 0 to 40
+40 killed, 0 survived, 0 ungraded, 40 graded
 sjp/memory.py: 22 mutation sites, running 0 to 22
 22 killed, 0 survived, 0 ungraded, 22 graded
 sjp/cli.py: 19 mutation sites, running 0 to 19
@@ -1147,30 +1248,47 @@ sjp/contract.py: 6 mutation sites, running 0 to 6
 scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
 19 killed, 1 survived, 0 ungraded, 20 graded
 jobs/sample.py: 35 mutation sites, running 0 to 35
-2 killed, 33 survived, 0 ungraded, 35 graded
+14 killed, 21 survived, 0 ungraded, 35 graded
 ```
 
-The last row is the honest one. Every surviving mutant in `jobs/sample.py` sits in code
-that only runs with a Spark session, and a check cannot have one. What grades that module
-is the three logs it produced, which is weaker than a mutant and is not nothing.
+The last row went from 2 of 35 to 14 of 35 and the reason is the one thing in this repo I
+got most wrong.
 
-That row has now got worse three times for the same reason. The join job added three sites
-and the skewed join added two more. The two cycle 2 jobs added twelve, taking the
-denominator from 23 to 35 while the numerator stayed at 2. All of them sit in the same
-unreachable place. Saying so is the point. A score that only ever gets quoted when it
-improves is not a measurement.
+For eleven days, which is every day this repo has existed, that row was explained away. The
+explanation was that every surviving mutant
+in `jobs/sample.py` sits in code that only runs with a Spark session, that a check cannot
+have one, and that what grades the module is the logs it produced. The first half of that
+is true of every other function in the file, all six of which need a driver. It was never
+true of `run`, which chooses
+a branch, and a branch choice needs no driver at all.
 
-The twelve new ones are worth naming rather than lumping in. Ten are inside `_wide` and the
-dispatch for the two new jobs, which cannot run without a session. The other two are the
-`WIDE_STEPS` and `SMALL_ROWS` constants, and a mutant that moves either of them produces a
-different fixture rather than a wrong answer, so no check could catch one without
-regenerating a log.
+So 33 survivors read as a property of the module rather than as a missing test, and one of
+them was not a mutant in a copy. It was a mutant that had been committed. A killed mutation
+pass left `job == "by_column"` as `job != "by_column"` in the working tree and the commit
+that added the two cycle 2 jobs took it in. Four job names then went down one branch, two
+crashed on a frame they were never handed, and `python -m sjp capture --job small` could not
+produce the fixture this file publishes figures from. The suite stayed green for three days
+because nothing had ever called `run` past its first line.
 
-That row got worse on purpose. Two of its mutants used to die against checks that read the
-module's own constants back out of the module, which is transcription and would have gone
-stale the moment somebody changed the constant and the check together. Those were replaced
-by checks that read the same settings out of the committed logs instead. The score fell and
-the question being asked got better.
+`tests/test_sample_jobs.py` now drives the dispatch against recorded helpers with pyspark
+stubbed out. It asserts the branch each job name reaches and what `_keyed` was called
+with. It also asserts whether a frame was handed over and which jobs switch broadcasting
+off. It is controlled against the arm order that shipped, so a recorder that could not tell
+the two apart fails.
+Every mutant in `run` and in the dispatch now dies.
+
+The 21 that remain are sites 0 to 21, which are the constants and the six functions that
+need a driver.
+A mutant on any of them changes what a capture would produce rather than what the code
+answers, and killing one means running Spark inside a check. That is the part of the old
+explanation that holds, and it is worth half as much now that it is not covering for the
+rest.
+
+Two mutants here used to die against checks that read the module's own constants back out
+of the module, which is transcription and would have gone stale the moment somebody changed
+the constant and the check together. Those were replaced by checks that read the same
+settings out of the committed logs instead. The score fell and the question being asked got
+better.
 
 The four survivors in `sjp/bench.py` are all boundary comparisons and all four were checked
 rather than waved through. One widens a float tolerance that already absorbs the
@@ -1243,9 +1361,15 @@ and is not deterministic on the shorter commands. Measured on 2026-10-03 at 20 o
 `skew` and 6 of 20 for `stages`, because a short output can drain from the buffer before the
 reader goes away. stderr stayed empty on all 40 runs.
 
-The byte and count floors in `skew.FLOORS` are `None`, which means no floor. The `small`
-fixture populates the small end of both ranges and is the evidence those floors have been
-missing. It does not place them.
+The byte and count floors are derived from a bracket whose two ends come from two logs, and
+every candidate across 3.7 orders of magnitude of that bracket gives the same answer on all
+eight. So the floors are bracketed and not located, and where they sit inside the bracket is
+a policy about the smallest job this tool will comment on.
+
+The millisecond floor is not derived and cannot be, because the 600 row log reports a noise
+duration eight times the smallest real one. The small log still produces two
+`executor_run_time` verdicts nobody would act on. A fix is a different mechanism rather than
+a different number and none has been measured.
 
 The model keeps every task of every stage. Both committed logs hold eighteen tasks. What
 this costs on a log from a job with a million tasks has not been measured, so nothing here
@@ -1290,10 +1414,11 @@ event log states what origins Spark can write. What is checked is that every ori
 eight committed logs carry is one this repo reads. A ninth log could carry a tenth name and
 the only thing that would say so is the report itself.
 
-The millisecond floor of 50 sits in a gap the two logs leave and its position inside that gap
-is a judgement. The sweep from 0 to 3041 is published above so the headline count reads as a
-fact about the floor. Bytes and counts have no floor at all, because neither log produces a
-case small enough to bound one, so a tiny byte skew is reported rather than suppressed.
+The millisecond floor of 50 sits in a gap the two eight million row logs leave and its
+position inside that gap is a judgement. The sweep from 0 to 3041 is published above so the
+headline count reads as a fact about the floor. That gap is also the thing the 600 row log
+falsified, so the floor is now a number with no live bracket behind it rather than a derived
+one.
 
 The spill analysis reports what spilled and cannot say what it spilled against. Both logs
 were captured in local mode and neither records the four properties that decide a task's

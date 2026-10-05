@@ -23,10 +23,22 @@ partitions, except for the one log the command above asks for 5. Adaptive execut
 on all of them. The first two differ in one expression, which is the key. Everything else is
 held.
 
-The first three ran on Java 11 and the last three on Java 21, five weeks later. Worth saying
-out loud because it is a reason to trust the numbers rather than a caveat on them. The key
-exchange on the skewed join writes 88,788,038 bytes and that figure was first measured on
-Java 11. It reproduced to the byte on Java 21 and again on a second benchmark schedule.
+Three of them ran on Java 11 and five on Java 21, eight days apart at the widest. Read out
+of the logs themselves rather than remembered. No command prints this, so it is a table.
+
+| Java version | logs |
+|---|---|
+| 11.0.32.1 | `skewed`, `balanced`, `join` |
+| 21.0.10 | `skewed_join`, `by_column`, `by_column_at_5` |
+| 21.0.12.1 | `wide`, `small` |
+
+That split is a reason to trust one figure rather than a caveat on all of them. The skewed
+job's key exchange writes 130,788,590 bytes. Recapturing the same job eleven days later
+returned the same number to the byte, four occurrences in the log either way.
+
+The skewed join's key exchange writes 88,788,038 bytes and that one says nothing about a
+runtime, because its log was captured on Java 21 and never on Java 11. What it survived is
+two separate benchmark schedules two days apart.
 
 Both join logs set `spark.sql.autoBroadcastJoinThreshold` to -1. Without that Spark sees a
 relation of a few kilobytes and broadcasts it, which produces a log holding the answer
@@ -65,19 +77,26 @@ case rather than a contrived one.
 Nothing in it is skewed. That is deliberate. `sjp skew` prints one line per metric per stage,
 and 48 stages against the 14 metric default set is 672 verdicts and **675 lines of output to
 say that nothing is wrong**. The tally and the worst line per unit are the last four. The six
-logs above print between 45 and 61 lines, which is why five weeks of work on this tool never
-ran into it.
+logs above print between 45 and 61 lines, which is why the first eight days of work on this
+tool never ran into it.
 
-`small` is the skewed distribution over **600 rows**. Its grouping stage reports
-`records_read` skewed at 43.17, a largest task of 518 records against a median of 12. It also
-reports `local_bytes_read` skewed at 9.39, which is 7,449 bytes against 793. Both verdicts are
-arithmetically correct and neither is worth acting on. `skew.FLOORS` carries a millisecond
-floor of 50 and leaves bytes and counts at `None`, and `None` means no floor.
+`small` is the skewed distribution over **600 rows**. Its grouping stage reported
+`records_read` skewed at 43.17, which is a largest task of 518 records against a median of
+12. It also reported `local_bytes_read` skewed at 9.39, which is 7,449 bytes against 793.
+Both verdicts were arithmetically correct and neither was worth acting on.
 
 It exists because a floor cannot be placed from one end of a range. The skewed join's key
 exchange writes 88,788,038 bytes. This stage's largest task reads 7,449. Four orders of
 magnitude apart, in the same repo, judged by the same rule with nothing in it.
 
-Both numbers above came off the deterministic half of the log and reproduced across two
-separate captures, to the record and to the byte. The millisecond metrics moved between those
-two captures, so nothing pins them.
+Those two numbers are now the noise end of the byte and count brackets, and both floors are
+derived from them. The log reports neither verdict any more. What it still reports is two
+`executor_run_time` verdicts, and that is the part this capture settled without being asked.
+One of its tasks runs 556 milliseconds on 600 rows, which is eight times the smallest
+millisecond value any log here calls real, so the millisecond bracket is inverted and no
+magnitude floor can close it. See `docs/adr-0006`.
+
+Both record and byte numbers above came off the deterministic half of the log and reproduced
+across three separate captures, to the record and to the byte. The third was 2026-10-05 on
+Java 11, against the first two on Java 21. The millisecond metrics moved every time, so
+nothing pins them.
