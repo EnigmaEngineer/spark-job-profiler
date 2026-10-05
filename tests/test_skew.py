@@ -19,6 +19,14 @@ from sjp import eventlog, model, skew
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKEWED_DIR = os.path.join(HERE, "fixtures", "eventlogs", "skewed")
 BALANCED_DIR = os.path.join(HERE, "fixtures", "eventlogs", "balanced")
+SMALL_DIR = os.path.join(HERE, "fixtures", "eventlogs", "small")
+SKEWED_JOIN_DIR = os.path.join(HERE, "fixtures", "eventlogs", "skewed_join")
+# Every log here, so a claim about what the floors change is a claim about all of them.
+ALL_DIRS = tuple(sorted(
+    os.path.join(HERE, "fixtures", "eventlogs", name)
+    for name in os.listdir(os.path.join(HERE, "fixtures", "eventlogs"))
+    if os.path.isdir(os.path.join(HERE, "fixtures", "eventlogs", name))))
+NO_FLOORS = {model.MILLIS: None, model.BYTES: None, model.COUNT: None}
 GROUPING_STAGE = 2
 METRICS = ("records_read", "duration", "executor_run_time")
 
@@ -161,8 +169,13 @@ def check_a_threshold_at_or_below_an_even_stage_is_refused():
         raise AssertionError("threshold {} was accepted".format(bad))
 
 def check_the_threshold_is_the_thing_that_decides():
-    """Same stage, two thresholds, two answers. Otherwise the argument is decorative."""
-    stage = _stage([100, 100, 100, 500])
+    """Same stage, two thresholds, two answers. Otherwise the argument is decorative.
+
+    The values are above the count floor on purpose. A ratio is scale free and the floor is
+    not, so a fixture built to exercise the threshold has to clear the floor or it never
+    reaches the division being tested.
+    """
+    stage = _stage([100000, 100000, 100000, 500000])
     assert skew.judge(stage, "records_read", 3.0).outcome == skew.SKEWED
     assert skew.judge(stage, "records_read", 9.0).outcome == skew.EVEN
 
@@ -218,8 +231,8 @@ def check_worst_is_none_when_nothing_skewed():
         assert skew.worst(skew.scan(_app(BALANCED_DIR)), kind) is None, kind
 
 def check_worst_breaks_a_tie_on_the_stage_id_rather_than_on_argument_order():
-    low = skew.judge(_stage([1, 1, 1, 100], stage_id=1), "records_read")
-    high = skew.judge(_stage([1, 1, 1, 100], stage_id=5), "records_read")
+    low = skew.judge(_stage([1000, 1000, 1000, 100000], stage_id=1), "records_read")
+    high = skew.judge(_stage([1000, 1000, 1000, 100000], stage_id=5), "records_read")
     assert low.ratio == high.ratio, (low, high)
     pair = [low, high]
     assert skew.worst(pair, model.COUNT) is low, skew.worst(pair, model.COUNT)
@@ -311,11 +324,28 @@ def check_exactly_the_floor_gets_an_answer():
     assert at.outcome == skew.SKEWED, at
     assert under.outcome == skew.UNDECIDED, under
 
-def check_a_kind_with_no_floor_is_judged_at_any_size():
-    """Bytes and counts have no measured floor, so nothing silences a small one."""
-    assert skew.FLOORS[model.BYTES] is None
-    assert skew.FLOORS[model.COUNT] is None
+def check_every_measured_kind_now_carries_a_floor():
+    """This check used to assert the opposite and that is the point of keeping it here.
+
+    Bytes and counts were `None` until a log populated their small end, and `None` meant a
+    one byte spill came back skewed. The replacement asserts the case that used to pass.
+    """
+    for kind in model.MEASURED:
+        assert skew.FLOORS[kind] is not None, kind
     tiny = skew.judge(_stage([0, 0, 0, 1], field="memory_spilled"), "memory_spilled")
+    assert tiny.outcome == skew.UNDECIDED, tiny
+    assert "under the bytes floor of 700000" in tiny.why, tiny
+
+
+def check_a_caller_can_still_turn_a_floor_off_and_the_small_verdict_comes_back():
+    """The probe that measured the brackets had to see what the floors hide.
+
+    So `floors` is not decoration. A caller passing a kind mapped to None gets the old
+    behaviour for that kind, which is how both ends of every bracket above were read.
+    """
+    off = {model.MILLIS: None, model.BYTES: None, model.COUNT: None}
+    tiny = skew.judge(_stage([0, 0, 0, 1], field="memory_spilled"), "memory_spilled",
+                      floors=off)
     assert tiny.outcome == skew.SKEWED, tiny
 
 def check_worst_by_kind_answers_once_per_unit_that_skewed():
@@ -359,9 +389,10 @@ def check_a_threshold_just_above_an_even_stage_is_accepted():
     2.0 is the interesting value to pin, because it is the ceiling a two task stage
     cannot pass, so somebody will eventually set it on purpose.
     """
-    verdict = skew.judge(_stage([1, 1, 1, 100]), "records_read", 2.0)
+    verdict = skew.judge(_stage([1000, 1000, 1000, 100000]), "records_read", 2.0)
     assert verdict.outcome == skew.SKEWED, verdict
-    assert skew.judge(_stage([1, 1, 1, 1]), "records_read", 1.0001).outcome == skew.EVEN
+    even = _stage([100000, 100000, 100000, 100000])
+    assert skew.judge(even, "records_read", 1.0001).outcome == skew.EVEN
 
 def check_a_stage_with_no_tasks_reports_zero_for_what_it_could_not_measure():
     """The verdict carries the numbers it was decided on, so they have to be honest.
@@ -376,14 +407,14 @@ def check_a_stage_with_no_tasks_reports_zero_for_what_it_could_not_measure():
 
 def check_exactly_the_task_floor_gets_an_answer():
     """Three tasks is the first count where a ratio can reach a threshold, so it answers."""
-    verdict = skew.judge(_stage([1, 1, 100]), "records_read")
+    verdict = skew.judge(_stage([1000, 1000, 100000]), "records_read")
     assert verdict.tasks == skew.MIN_TASKS, verdict
     assert verdict.outcome == skew.SKEWED, verdict
     assert verdict.ratio == 100.0, verdict
 
 def check_a_ratio_exactly_at_the_threshold_is_even():
     """The rule is above the threshold and not at it. A boundary needs one of the two."""
-    stage = _stage([1, 1, 1, 4])
+    stage = _stage([25000, 25000, 25000, 100000])
     assert stage.largest("records_read") / stage.median("records_read") == 4.0
     assert skew.judge(stage, "records_read", 4.0).outcome == skew.EVEN
     assert skew.judge(stage, "records_read", 3.9999).outcome == skew.SKEWED
@@ -487,3 +518,251 @@ def check_only_refuses_an_outcome_that_is_not_one():
         assert "is not an outcome" in str(error), str(error)
     else:
         raise AssertionError("accepted an outcome that does not exist")
+
+
+# the floors, and the bracket each one was derived from
+
+def _byte_and_count_verdicts(directory, floors=None):
+    """Every skewed byte or count verdict in one log.
+
+    Each one comes back as its kind beside its metric name and its largest task value.
+    """
+    found = []
+    for verdict in skew.scan(_app(directory), floors=floors):
+        if verdict.outcome != skew.SKEWED:
+            continue
+        kind = model.kind_of(verdict.metric)
+        if kind in (model.BYTES, model.COUNT):
+            found.append((kind, verdict.metric, verdict.largest))
+    return sorted(found)
+
+
+def check_the_derivation_reproduces_the_millisecond_floor_that_shipped_before_it():
+    """The only independent case the rule has, so it is the one worth pinning.
+
+    50 was placed by hand inside a measured gap of 29 to 71 weeks before `floor_from`
+    existed. The rule returns it. That is one agreement rather than a law and
+    `docs/adr-0006` says so, but a rule that disagreed with the number already shipped
+    would have been a rule invented to produce the two new ones.
+    """
+    assert skew.floor_from((29, 71)) == 50, skew.floor_from((29, 71))
+    assert skew.FLOORS[model.MILLIS] == 50, skew.FLOORS
+
+
+def check_each_derived_floor_is_the_geometric_mean_of_its_own_bracket():
+    """Derived and not typed, so a floor cannot drift from the bracket it came from.
+
+    Two kinds are derived and one is not, and the set is asserted rather than the pair,
+    because a third bracket arriving unnoticed is how the millisecond claim got made.
+    """
+    assert set(skew.BRACKETS) == {model.BYTES, model.COUNT}, skew.BRACKETS
+    assert set(skew.FLOORS) == set(model.MEASURED), skew.FLOORS
+    for kind, bracket in skew.BRACKETS.items():
+        assert skew.FLOORS[kind] == skew.floor_from(bracket), (kind, bracket)
+    assert skew.FLOORS[model.MILLIS] == skew.MILLIS_FLOOR, skew.FLOORS
+
+
+def check_every_floor_sits_strictly_inside_its_bracket():
+    """A floor at either end is a floor deciding against the evidence that placed it."""
+    for kind, (noise, real) in skew.BRACKETS.items():
+        floor = skew.FLOORS[kind]
+        assert noise < floor < real, (kind, noise, floor, real)
+
+
+def check_the_slack_each_floor_leaves_is_computed_rather_than_claimed():
+    """The README publishes these multiples and arithmetic over a table goes stale.
+
+    Both sides are reported because a floor far from the middle of its bracket is the
+    thing to argue with, and a reader cannot see that from the floor alone.
+    """
+    expected = {model.BYTES: (93, 84), model.COUNT: (115, 115)}
+    for kind, (noise, real) in skew.BRACKETS.items():
+        floor = skew.FLOORS[kind]
+        above = int(floor // noise)
+        below = int(real // floor)
+        assert (above, below) == expected[kind], (kind, above, below)
+
+
+def check_a_bracket_whose_ends_are_the_wrong_way_round_is_refused():
+    """A noise end above a real end is a measurement error and not a narrow bracket."""
+    for bad in ((71, 29), (50, 50), (0, 10), (-1, 10)):
+        try:
+            skew.floor_from(bad)
+        except ValueError:
+            continue
+        raise AssertionError("bracket {} was accepted".format(bad))
+
+
+def check_the_noise_end_of_both_brackets_is_what_the_small_log_really_reads():
+    """Re-derived from the log rather than trusted, because both ends are measurements.
+
+    The small log is the skewed distribution over 600 rows. Its largest byte verdict and
+    its largest count verdict are the two noise ends, and they are what the brackets say.
+    """
+    found = _byte_and_count_verdicts(SMALL_DIR, floors=NO_FLOORS)
+    largest = {}
+    for kind, _metric, value in found:
+        largest[kind] = max(value, largest.get(kind, 0))
+    assert largest[model.BYTES] == skew.BRACKETS[model.BYTES][0], largest
+    assert largest[model.COUNT] == skew.BRACKETS[model.COUNT][0], largest
+
+
+def check_the_real_end_of_both_brackets_is_the_smallest_a_pathology_log_reads():
+    """The other end, over every committed log, so nothing smaller is sitting unnoticed.
+
+    A bracket's real end has to be the smallest real value anywhere rather than the
+    smallest one in the log the author happened to open. The two logs captured at eight
+    million rows are the only ones that reach a byte or count verdict at all.
+    """
+    smallest = {}
+    for directory in ALL_DIRS:
+        if directory == SMALL_DIR:
+            continue
+        for kind, _metric, value in _byte_and_count_verdicts(directory, floors=NO_FLOORS):
+            smallest[kind] = min(value, smallest.get(kind, value))
+    assert smallest[model.BYTES] == skew.BRACKETS[model.BYTES][1], smallest
+    assert smallest[model.COUNT] == skew.BRACKETS[model.COUNT][1], smallest
+
+
+def check_the_floors_remove_every_byte_and_count_verdict_from_the_small_log():
+    """What the day was for. Two verdicts, both arithmetically right, neither actionable."""
+    before = _byte_and_count_verdicts(SMALL_DIR, floors=NO_FLOORS)
+    after = _byte_and_count_verdicts(SMALL_DIR)
+    assert len(before) == 2, before
+    assert after == [], after
+
+
+def check_the_floors_remove_nothing_from_either_pathology_log():
+    """The control. A floor that quietened the fixtures this tool exists for is a bug.
+
+    Eight verdicts across the two logs, four bytes and one count each, and the floors
+    leave all eight standing.
+    """
+    for directory in (SKEWED_DIR, SKEWED_JOIN_DIR):
+        before = _byte_and_count_verdicts(directory, floors=NO_FLOORS)
+        after = _byte_and_count_verdicts(directory)
+        assert len(before) == 5, (directory, before)
+        assert after == before, (directory, before, after)
+
+
+def check_the_floors_change_nothing_on_a_log_that_never_reached_a_verdict():
+    """Four logs produce no byte or count verdict at all and the floors must not invent one."""
+    quiet = [d for d in ALL_DIRS
+             if os.path.basename(d) in ("balanced", "join", "by_column", "wide")]
+    assert len(quiet) == 4, quiet
+    for directory in quiet:
+        assert _byte_and_count_verdicts(directory, floors=NO_FLOORS) == [], directory
+        assert _byte_and_count_verdicts(directory) == [], directory
+
+
+def check_exactly_the_byte_floor_gets_an_answer():
+    """Both sides of the new limit, which is where a mutant goes when nothing sits on it.
+
+    The values are written out rather than read off `FLOORS`, so a change to either floor
+    fails here and has to be argued for. The check above is what ties them to the brackets.
+    """
+    assert skew.FLOORS[model.BYTES] == 700000, skew.FLOORS
+    at = skew.judge(_stage([0, 0, 0, 700000], field="disk_spilled"), "disk_spilled")
+    under = skew.judge(_stage([0, 0, 0, 699999], field="disk_spilled"), "disk_spilled")
+    assert at.outcome == skew.SKEWED, at
+    assert under.outcome == skew.UNDECIDED, under
+    assert "under the bytes floor of 700000" in under.why, under
+
+
+def check_exactly_the_count_floor_gets_an_answer():
+    assert skew.FLOORS[model.COUNT] == 60000, skew.FLOORS
+    at = skew.judge(_stage([0, 0, 0, 60000], field="records_written"), "records_written")
+    under = skew.judge(_stage([0, 0, 0, 59999], field="records_written"), "records_written")
+    assert at.outcome == skew.SKEWED, at
+    assert under.outcome == skew.UNDECIDED, under
+    assert "under the count floor of 60000" in under.why, under
+
+
+def check_the_small_log_falsifies_the_millisecond_bracket_that_shipped():
+    """The sharpest thing the new fixture did, and it was not what it was captured for.
+
+    The millisecond floor was placed inside a bracket of 29 to 71 read off the two logs
+    captured at eight million rows. A 600 row job runs a task for 556 milliseconds, so the
+    largest noise value is eight times the supposed smallest real one. Re-derived here off
+    the log rather than quoted, because a falsification carried as a literal is a claim.
+    """
+    noisiest = 0
+    for verdict in skew.scan(_app(SMALL_DIR), floors=NO_FLOORS):
+        if verdict.outcome == skew.SKEWED and model.kind_of(verdict.metric) == model.MILLIS:
+            noisiest = max(noisiest, verdict.largest)
+    assert noisiest == skew.MILLIS_BRACKET_AS_MEASURED[0], noisiest
+    real_end = skew.MILLIS_BRACKET_AS_MEASURED[1]
+    assert noisiest > real_end, (noisiest, real_end)
+    assert noisiest > skew.FLOORS[model.MILLIS], noisiest
+
+
+def check_the_measured_millisecond_bracket_is_refused_by_the_derivation():
+    """So the floor that is hand placed is the one the rule cannot place.
+
+    Without this the module reads as though two floors were derived and the third was an
+    oversight. It was measured and it came back unplaceable.
+    """
+    try:
+        skew.floor_from(skew.MILLIS_BRACKET_AS_MEASURED)
+    except ValueError as problem:
+        assert "556" in str(problem), problem
+    else:
+        raise AssertionError("the inverted millisecond bracket produced a floor")
+
+
+def check_the_millisecond_floor_still_leaves_the_small_log_two_verdicts():
+    """What the day did not fix, asserted rather than left in prose nothing reads.
+
+    Both are executor run time on a 600 row job and neither is worth acting on. The byte
+    and count verdicts are gone and these two are the residue, which is the honest state
+    of this fixture and the reason `ot-117` is open.
+    """
+    left = [v for v in skew.scan(_app(SMALL_DIR))
+            if v.outcome == skew.SKEWED]
+    assert len(left) == 2, left
+    for verdict in left:
+        assert verdict.metric == "executor_run_time", verdict
+        assert model.kind_of(verdict.metric) == model.MILLIS, verdict
+
+
+def check_a_bracket_whose_noise_end_is_one_is_still_accepted():
+    """A case exactly on the guard, because that is where a mutant goes.
+
+    The guard refuses a bracket that is not a positive noise end below a real end, and
+    nothing here had a noise end of 1, so widening the test to refuse that as well changed
+    no answer and survived. These numbers are not a bracket anything would really measure.
+    The function's contract is about the ordering rather than about the magnitude.
+    """
+    assert skew.floor_from((1, 10)) == 3, skew.floor_from((1, 10))
+    assert skew.floor_from((1, 1000000)) == 1000, skew.floor_from((1, 1000000))
+
+
+def check_the_real_end_of_the_millisecond_bracket_is_read_off_the_skewed_log():
+    """So the inverted bracket is two measured numbers rather than one and a literal.
+
+    71 is the smallest millisecond value on the skewed log that clears the floor already in
+    place, which is what makes it the smallest one anything here treats as real. The
+    published sweep in the README rests on the same reading.
+    """
+    floor = skew.FLOORS[model.MILLIS]
+    above = [v.largest for v in skew.scan(_app(SKEWED_DIR), floors=NO_FLOORS)
+             if v.outcome == skew.SKEWED
+             and model.kind_of(v.metric) == model.MILLIS
+             and v.largest >= floor]
+    assert min(above) == skew.MILLIS_BRACKET_AS_MEASURED[1], (sorted(above),
+                                                              skew.MILLIS_BRACKET_AS_MEASURED)
+
+
+def check_the_published_millisecond_value_list_is_what_the_two_logs_really_produce():
+    """The README prints this list and nothing had ever re-derived it.
+
+    Over the two logs captured at eight million rows, which is the pair the millisecond
+    floor was placed on. The 600 row log is deliberately not in it, because adding it is
+    what inverts the bracket and that is argued separately.
+    """
+    values = set()
+    for directory in (SKEWED_DIR, BALANCED_DIR):
+        for verdict in skew.scan(_app(directory), floors=NO_FLOORS):
+            if verdict.outcome == skew.SKEWED and model.kind_of(verdict.metric) == model.MILLIS:
+                values.add(verdict.largest)
+    assert sorted(values) == [3, 8, 24, 29, 71, 3040, 3048], sorted(values)

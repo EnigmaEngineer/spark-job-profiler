@@ -59,18 +59,65 @@ MIN_TASKS = 3
 # rule cannot tell that from the 620,755,808 byte spill it was written for, because the
 # ratio is unbounded in both cases and a ratio carries no unit.
 #
-# Milliseconds are bounded on both sides by the two logs. The largest value that is noise is
-# 29 and the smallest that is real is 71, so 50 sits between them with room either way.
+# The bracket for each kind whose two ends a committed log has really populated. The
+# largest value that is noise and the smallest that is real. `tests/test_skew.py`
+# re-derives both ends off the logs rather than trusting the pair written here.
 #
-# Bytes and counts are bounded on one side only. Neither log produces a byte or a record
-# verdict small enough to be noise, so nothing here measures where that floor belongs and
-# None means no floor rather than a number I would have invented. The cost is stated in
-# docs/adr-0004 and a byte case small enough to be noise would be a reason to revisit.
-FLOORS = {
-    model.MILLIS: 50,
-    model.BYTES: None,
-    model.COUNT: None,
+# The small end needed a second kind of fixture. A pathology captured at one row count only
+# ever populates one end, so these were `None` for nine days and `None` meant no floor. The
+# small log is the same skewed distribution over 600 rows, where the hot key still takes 85
+# percent of the rows and the biggest task reads 7,449 bytes and 518 records.
+BRACKETS = {
+    model.BYTES: (7449, 59191004),
+    model.COUNT: (518, 6932663),
 }
+
+
+def floor_from(bracket):
+    """The geometric mean of a bracket, to one significant figure.
+
+    A geometric mean rather than an arithmetic one because these are quantities people
+    compare by ratio. The byte bracket spans 7,946 times and its arithmetic middle sits
+    within a factor of two of the real end, which is a floor that would start deciding
+    against real evidence the first time a job came in slightly smaller.
+
+    One significant figure because the precision is not there. Rounding to it leaves
+    roughly equal multiplicative slack on each side, 93 times the noise end against an
+    84th of the real end for bytes, and 115 times either way for counts.
+    """
+    low, high = bracket
+    if not 0 < low < high:
+        raise ValueError("bracket {} is not a noise end below a real end".format(bracket))
+    middle = math.sqrt(low * high)
+    return int(round(middle, -math.floor(math.log10(middle))))
+
+
+# What the millisecond bracket really is once the 600 row log is read with the other seven.
+# A noise end ABOVE a real end, so `floor_from` refuses it and there is no number to place.
+#
+# 556 is the small log's grouping stage, one task running 556 milliseconds against a median
+# of 114.5 over 600 rows. 71 is the skewed log's garbage collection pause at eight million
+# rows, which is the smallest value anything here calls real.
+MILLIS_BRACKET_AS_MEASURED = (556, 71)
+
+# So the millisecond floor stays the hand placed number it has always been.
+#
+# It was put inside a bracket of 29 to 71 read off the two logs captured at eight million
+# rows, and `floor_from` returns 50 for that pair, which is the number that shipped weeks
+# before any of this was written. That agreement is worth one line and it is not evidence
+# the bracket was right. The small log falsifies it.
+#
+# The reason the method works for two kinds and not the third is that bytes and records
+# scale with the data and a task's wall time does not. A 600 row task still pays for a JVM,
+# a launch and a serialisation, so the millisecond floor under a trivial job is set by fixed
+# cost rather than by the work. A magnitude floor cannot separate that from a real pause and
+# the fix is a different mechanism rather than a different number. See `docs/adr-0006`.
+MILLIS_FLOOR = 50
+
+# Derived where the evidence allows it, so a floor cannot drift from the bracket it came
+# from, and hand placed where it does not.
+FLOORS = {kind: floor_from(bracket) for kind, bracket in BRACKETS.items()}
+FLOORS[model.MILLIS] = MILLIS_FLOOR
 
 # Every quantity a task carries, because the alternative was a list of three I chose.
 #
