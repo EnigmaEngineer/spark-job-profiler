@@ -738,9 +738,11 @@ def check_the_report_prints_the_arithmetic_it_is_refusing_to_recommend():
     assert not any("schedule after" in line for line in lines)
 
 def check_the_skewed_join_key_exchange_still_measures_what_the_benchmark_measured():
-    """Captured on Java 21 against a reading first taken on Java 11, five weeks apart, and
-    the key exchange reproduces to the byte. A figure that survives a major runtime version
-    is the strongest evidence available that the runtime is not in it.
+    """Two benchmark schedules two days apart, and the key exchange reproduces to the byte.
+
+    This log was captured on Java 21 and never on Java 11, so it is not evidence about a
+    runtime version. The log that carries that evidence is `skewed`, whose key exchange
+    writes 130,788,590 bytes under Java 11 and the same number re-measured under Java 21.
 
     `python -m sjp capture --job skewed_join --out <dir> --rows 8000000` is what produced
     the log this reads."""

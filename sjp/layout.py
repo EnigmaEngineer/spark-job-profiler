@@ -383,7 +383,7 @@ def advise(app, shuffle, advisory=ADVISORY_BYTES, threshold=skew.DEFAULT_THRESHO
 
     `size` is arithmetic over a total and a total cannot see a distribution. There is one
     shape where that arithmetic was benchmarked and it lost, on two separate schedules
-    five weeks apart. Cutting the count on a hash partitioning whose next stage is
+    two days apart. Cutting the count on a hash partitioning whose next stage is
     carrying a hot key left the stage wall undecided both times, at ratios of 0.9916 and
     1.0797. It made the largest task slower both times and separated both times, at
     ratios of 1.3979 and 1.5170 against a p floor of 0.0286. A hash sends one key to one

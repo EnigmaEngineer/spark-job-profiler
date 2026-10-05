@@ -240,8 +240,8 @@ def check_the_wide_fixture_still_prints_675_lines_and_answers_in_the_first_three
     lines carrying the answer were 674 and 675, so a reader scrolled a screen of noise to
     reach them. Day 2 moved them to 2 and 3 and left the body where it was.
 
-    The five cycle 1 logs all print between 45 and 61 lines, which is why five weeks of
-    work on this tool never ran into this.
+    The five cycle 1 logs all print between 45 and 61 lines, which is why the seven days
+    of work that produced them never ran into this.
     """
     from sjp import commands, skew
 
