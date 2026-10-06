@@ -250,6 +250,7 @@ local-1790267120237  sjp-skewed  threshold 4.0  12 verdicts
   worst bytes   stage 2 on memory_spilled at unbounded
   worst millis  stage 2 on duration at 14.7246
   3 skewed, 2 even, 7 undecided
+  sjp 0.2.0  exit 1 over metric set selected 4:0d5a3c78
   skewed    stage 2  records_read         44.2179  largest task 6932663 against a median of 156784
   skewed    stage 2  memory_spilled     unbounded  more than half the tasks read zero and one reads 620755808
   skewed    stage 2  duration             14.7246  largest task 3048 against a median of 207
@@ -274,9 +275,12 @@ The same command on the balanced log, which differs from the skewed one in one e
 ```
   nothing skewed at this threshold
   0 skewed, 11 even, 31 undecided
+  sjp 0.2.0  exit 0 over metric set selected 4:0d5a3c78
 ```
 
-It exits 1 when something skewed, so a shell can act on the answer.
+It exits 1 when something skewed, so a shell can act on the answer. The line above says
+which set that status was counted over, which is the part a shell cannot work out for
+itself. `## The exit status, and the set it is counted over` below is about why.
 
 ### There is a third verdict and it carried the day
 
@@ -355,6 +359,10 @@ millis   executor_run_time  deserialize_time  serialize_time  gc_time  duration 
 An executor id and a launch time are declared too, as `identity` and `instant`, and neither
 is judged. A ratio over a launch time is arithmetic on a clock reading.
 
+That sentence was not true until 2026-10-06. The set the tool chooses never held either of
+them, and `--metric launch_time` was accepted and scanned for eleven days. It is refused
+now and the section on the exit status below is where that is written down.
+
 ### Widening it broke the control, and that is what the floor is for
 
 The balanced log is the fixture whose job is to have nothing wrong with it. Over fourteen
@@ -365,6 +373,7 @@ python -m sjp skew tests/fixtures/eventlogs/balanced/* --metric serialize_time
 local-1790267152313  sjp-balanced  threshold 4.0  3 verdicts
   nothing skewed at this threshold
   0 skewed, 0 even, 3 undecided
+  sjp 0.2.0  exit 0 over metric set selected 1:4d4de2bc
   undecided stage 0  serialize_time      no ratio  2 tasks, and below 3 the ratio cannot pass 2
   undecided stage 1  serialize_time      no ratio  every task reads zero, so there is no spread
   undecided stage 2  serialize_time      no ratio  largest task 8 is under the millis floor of 50
@@ -974,17 +983,20 @@ shape the guard could be withholding on every hash it sees and every check would
 Added 2026-10-02. The five jobs above all carry something wrong with the query. These two
 carry something wrong with this tool.
 
-### 675 lines to say nothing is wrong
+### 676 lines to say nothing is wrong
 
 `sjp skew` printed one line per metric per stage, then the tally, then the worst line per
 unit. On every log in this repo until the `wide` capture that was fine.
 
 ```
 $ python -m sjp skew tests/fixtures/eventlogs/skewed/*   | wc -l
-47
+48
 $ python -m sjp skew tests/fixtures/eventlogs/wide/*     | wc -l
-675
+676
 ```
+
+Both figures are one higher than they were when this section was written, because day 5
+added the line naming the metric set under the tally. The heading moved with them.
 
 The `wide` job runs 24 small aggregates in one application instead of one large one, which
 gives the application 48 stages. 48 stages times the 14 metric default set is 672 verdicts.
@@ -996,9 +1008,9 @@ python -m sjp skew tests/fixtures/eventlogs/wide/* | tail -2
   undecided stage 47  serialize_time      no ratio  every task reads zero, so there is no spread
 ```
 
-Those used to be the two lines carrying the answer, which is to say the answer was 674 and
-675 and everything above it was a stage that is fine on a metric nobody asked about. The
-section below moved them.
+Those used to be the two lines carrying the answer, which is to say the answer was the last
+two lines of 675 and everything above them was a stage that is fine on a metric nobody asked
+about. The section below moved them.
 
 This was not a guess. The default metric set was widened from three to fourteen on
 2026-09-27 and the cost of that was recorded at the time as an open question, against logs
@@ -1143,7 +1155,10 @@ cost rather than by work, and no magnitude floor separates it from a real pause.
 Added 2026-10-03. Three changes to the same command and not one of them is about length.
 
 **The summary moved to the top.** The worst line per unit, then the tally, then the
-verdicts. The wide log still prints exactly 675 lines. Trimming was never the fix.
+verdicts. The wide log still prints every verdict it did before. Trimming was never the fix.
+
+The figure was 675 when this section was written and it is 676 now, because day 5 added one
+line under the tally on every run.
 
 **`--only` filters the body**, one outcome at a time.
 
@@ -1151,12 +1166,18 @@ verdicts. The wide log still prints exactly 675 lines. Trimming was never the fi
 $ python -m sjp skew tests/fixtures/eventlogs/wide/* --only skewed
 local-1790970447319  sjp-wide  threshold 4.0  672 verdicts
   nothing skewed at this threshold
-  0 skewed, 103 even, 569 undecided
+  0 skewed, 55 even, 617 undecided
+  sjp 0.2.0  exit 0 over metric set default 14:e575855f
   showing 0 of 672, skewed only
 ```
 
-675 lines to 4. That last line is there because a reader who filters still has to be told
+676 lines to 5. That last line is there because a reader who filters still has to be told
 what was left out.
+
+The tally in that block read `0 skewed, 103 even, 569 undecided` until 2026-10-06, which was
+this log before the byte and count floors landed the day before. The transcript was a day
+stale and nothing caught it, because the block gate reads figures against captured logs and
+a tally is not a figure in a log. Re-derived here by running the command.
 
 **The body is ranked, and the ranking stays inside a unit.** Skewed verdicts come first and
 undecided ones last. Inside an outcome the verdicts group by unit and sort by ratio with the
@@ -1199,7 +1220,7 @@ false statement about a job that skewed on eight.
 
 ### Piping it to head is no longer a traceback
 
-675 lines is a thing a reader pipes into `head`, and that used to print a `BrokenPipeError`
+676 lines is a thing a reader pipes into `head`, and that used to print a `BrokenPipeError`
 over the top of the output. The entry point catches it now and returns 141. The flush
 happens inside that handler rather than at interpreter shutdown, because a short command
 fits in the buffer and the write that fails is the final flush.
@@ -1213,16 +1234,107 @@ returns 141 every time and `sjp stages` on 6 of 20. `stages` writes little enoug
 buffer sometimes drains before the reader goes away. What held on all 40 runs is that
 stderr stayed empty.
 
+## The exit status, and the set it is counted over
+
+Added 2026-10-06. `sjp skew` exits 1 when a stage skewed. That status is counted over
+whatever the scan judged, and until today nothing in the output said what that was.
+
+The set is not fixed. It is derived from the kind declared on every field of `model.Task`,
+so a field added there widens it with nobody editing `sjp/skew.py`. It has already widened
+once, from three names to fourteen, and the same log answered differently afterwards.
+
+```
+$ python -m sjp version
+sjp 0.2.0
+metric set default 14:e575855f
+  executor_run_time  millis
+  deserialize_time   millis
+  serialize_time     millis
+  gc_time            millis
+  peak_memory        bytes
+  memory_spilled     bytes
+  disk_spilled       bytes
+  records_read       count
+  local_bytes_read   bytes
+  remote_bytes_read  bytes
+  records_written    count
+  bytes_written      bytes
+  duration           millis
+  outside_run_time   millis
+```
+
+The id is the count of metrics and eight hex characters of a digest over their sorted
+names. Sorted, because asking for the same fourteen in a different order is the same
+question. Derived, because a hand written version is exactly the thing that cannot track a
+set the code derives. A field added to the task record changes the id without anyone
+remembering to.
+
+`skew.METRIC_SET_HISTORY` holds both sets this tool has shipped against the version that
+shipped them. `3:5f2a4f77` is the three names, read out of commit 4a5d5c0 rather than out
+of memory. `14:e575855f` is today's. A check asserts the live set is the last entry and
+that `sjp.__version__` is its version, so widening the set without recording what it became
+fails the suite.
+
+The version promises nothing about compatibility. Nothing outside this repo imports `sjp`.
+Its minor digit moves when the metric set moves and that is all it is for.
+
+### A metric a ratio cannot measure is refused now
+
+`--metric launch_time` was accepted and scanned for eleven days. `launch_time` is declared
+an `instant`. A median relative ratio over two wall clock readings is close to 1.0 by
+construction, so it reported `even` on every stage of every log and meant nothing.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/small/* --metric launch_time
+refused launch_time. a declared instant rather than a measured quantity
+$ echo $?
+2
+```
+
+The status is the half of this that matters. Measured on 2026-10-06 against the tree before
+the change, `--metric launch_time` printed two verdicts at `1.0000` off values near
+1790970484000 and exited **0**, which a shell reads as a job with nothing wrong.
+`--metric executor_id` was worse. It reached `statistics.median` and raised a `TypeError`
+on `'str' and 'int'`. The interpreter then exited **1**, which a shell reads as a stage that
+skewed. A typo in a metric name did the same thing.
+
+So the refusal needed a status that is neither. 2 is the entry point's `REFUSED` and no
+command here returns it as an answer.
+
+Every refused name is reported rather than the first one, because a caller who fixes one
+and runs again has been told half the answer twice.
+
+```
+$ python -m sjp skew tests/fixtures/eventlogs/small/* --metric launch_time --metric failed --metric nope
+refused launch_time. a declared instant rather than a measured quantity
+refused failed. a declared flag rather than a measured quantity
+refused nope. not a task quantity
+```
+
+The refusal lives in `sjp/skew.py` rather than in the command, and `judge` repeats it for a
+caller holding one stage. `scan` calls `judge` 672 times on the wide log, so the repeat is
+paid for. Measured over 20 runs on 2026-10-06, the scan goes from a median of 2.9 ms to
+4.2 ms.
+
+### A crash used to be worth the same as a finding
+
+Every command here answers its own question with 0 and 1. An unhandled exception left the
+interpreter to exit 1, so a crash and a stage that skewed were the same status to a shell.
+
+The entry point catches it now, prints the traceback to stderr and returns 3. `SystemExit`
+and `KeyboardInterrupt` are not caught, because argparse raises the first to refuse an
+argument and that is already a usage error with a status of its own.
+
 ## Running the checks
 
 ```
 python tests/run_all.py
-410 passed, 0 failed, 410 checks
+425 passed, 0 failed, 425 checks
 ```
 
-Every check is graded by a mutation pass rather than counted. `sjp/skew.py` and
-`jobs/sample.py` were re-run after the floors went in and the other ten rows are from
-earlier passes.
+Every check is graded by a mutation pass rather than counted. Three rows were re-run on
+2026-10-06 after the metric set work, which are `sjp/skew.py` and `sjp/cli.py` and
+`sjp/commands.py`. `jobs/sample.py` is from 2026-10-05. The other eight are earlier passes.
 
 ```
 sjp/layout.py: 114 mutation sites, running 0 to 114
@@ -1233,14 +1345,14 @@ sjp/model.py: 44 mutation sites, running 0 to 44
 44 killed, 0 survived, 0 ungraded, 44 graded
 sjp/plan.py: 33 mutation sites, running 0 to 33
 33 killed, 0 survived, 0 ungraded, 33 graded
-sjp/commands.py: 31 mutation sites, running 0 to 31
-31 killed, 0 survived, 0 ungraded, 31 graded
-sjp/skew.py: 40 mutation sites, running 0 to 40
-40 killed, 0 survived, 0 ungraded, 40 graded
+sjp/commands.py: 30 mutation sites, running 0 to 30
+30 killed, 0 survived, 0 ungraded, 30 graded
+sjp/skew.py: 45 mutation sites, running 0 to 45
+45 killed, 0 survived, 0 ungraded, 45 graded
 sjp/memory.py: 22 mutation sites, running 0 to 22
 22 killed, 0 survived, 0 ungraded, 22 graded
-sjp/cli.py: 19 mutation sites, running 0 to 19
-19 killed, 0 survived, 0 ungraded, 19 graded
+sjp/cli.py: 23 mutation sites, running 0 to 23
+23 killed, 0 survived, 0 ungraded, 23 graded
 sjp/eventlog.py: 9 mutation sites, running 0 to 9
 9 killed, 0 survived, 0 ungraded, 9 graded
 sjp/contract.py: 6 mutation sites, running 0 to 6
@@ -1343,18 +1455,28 @@ argues that they are uninteresting.
 
 Closed in v2. `sjp skew` used to print every verdict with no ranking and no filter, with the
 summary last, so the wider the log the further a reader scrolled to reach it. The summary is
-first now and `--only` filters the body. The wide log goes from 675 lines to 4 when asked
-for the skewed verdicts alone, and it still prints 675 unfiltered because the length was
+first now and `--only` filters the body. The wide log goes from 676 lines to 5 when asked
+for the skewed verdicts alone, and it still prints 676 unfiltered because the length was
 never the part that mattered.
 
 What the ranking does not do is compare two units. The body sorts by ratio inside a unit and
 groups the units in declared order, so a reader cannot ask which single verdict in a log is
 worst. That question has no answer a ratio can give.
 
-`sjp skew` judges any quantity a caller names with `--metric`, including `launch_time`,
-which is a point on the clock rather than an amount of anything. A median relative ratio over
-two wall clock instants is close to 1.0 by construction and means nothing. Nothing refuses it
-and the ranking sorts those verdicts after the measured kinds rather than raising.
+Closed in v2. `sjp skew` used to judge any quantity a caller named with `--metric`,
+including `launch_time`, which is a point on the clock rather than an amount of anything.
+It is refused now and the status is 2, which this command never returns as an answer about
+a job. `--metric executor_id` used to crash and exit 1, which a shell reads as a stage that
+skewed.
+
+What that leaves open is the version. `sjp 0.2.0` makes no compatibility promise and its
+minor digit tracks the metric set alone. A check holds the live set against the last entry
+of `skew.METRIC_SET_HISTORY`, so widening the set without recording it fails. Rewriting that
+last entry in place rather than appending to it would pass, and nothing here would notice.
+
+The metric set id is eight hex characters of a digest. That separates the handful of sets
+this tool will have and it is an identity rather than a defence against anyone constructing
+a collision.
 
 The exit status of a command whose output was cut off by a closed pipe is 141 on `sjp skew`
 and is not deterministic on the shorter commands. Measured on 2026-10-03 at 20 of 20 for
