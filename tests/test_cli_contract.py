@@ -66,6 +66,22 @@ def check_the_reserved_name_is_refused():
         _restore(saved)
 
 
+def check_the_status_numbers_are_the_ones_the_readme_published():
+    """Pinned as literals, and that is the point of the check.
+
+    A mutation pass on 2026-10-06 moved `OK` to 1, `REFUSED` to 3 and `FAILED` to 4 and
+    every check survived, because they all compared a returned status against the constant
+    and the mutant moved both sides together. `FOUND` died only because other checks say
+    `== 1` in full.
+
+    These four numbers are a contract with a shell rather than an internal label, so one
+    check holds them as digits and everything else can go on reading the names.
+    """
+    assert (cli.OK, cli.FOUND, cli.REFUSED, cli.FAILED) == (0, 1, 2, 3), (
+        cli.OK, cli.FOUND, cli.REFUSED, cli.FAILED)
+    assert len({cli.OK, cli.FOUND, cli.REFUSED, cli.FAILED}) == 4
+
+
 def check_the_mapping_is_json_and_covers_every_command():
     from sjp import commands  # noqa: F401  registers the real ones
     text = json.dumps(cli.mapping())

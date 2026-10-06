@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 
 READ = "read"
 WRITE = "write"
@@ -28,6 +29,21 @@ EFFECTS = (READ, WRITE, EMERGENCY)
 # Reserved because `commands` is handled before the parser is built, so a command of that
 # name would register fine and then never run.
 RESERVED = ("commands",)
+
+# What a status means here.
+#
+# Every command in this tool answers its own question with 0 and 1. `sjp skew` exits 1 for
+# a stage that skewed, `sjp spill` for a job that spilled, `sjp layout` for a count worth
+# changing. So anything that is not an answer has to be neither of those two, or a shell
+# reads it as the answer.
+#
+# This is not hypothetical. Measured on 2026-10-06, `sjp skew <log> --metric executor_id`
+# raised a TypeError out of `statistics.median` and the interpreter exited 1, which is the
+# status that means a stage skewed. A typo in a metric name did the same thing.
+OK = 0
+FOUND = 1
+REFUSED = 2
+FAILED = 3
 
 COMMANDS = {}
 
@@ -105,3 +121,12 @@ def main(argv=None):
         # shell reports for a pipeline killed this way.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 141
+    except Exception:
+        # Without this the interpreter handles the exception and exits 1, and 1 is an
+        # answer. The traceback still goes to stderr, because a status is not a diagnosis
+        # and a status that is also a diagnosis is how this got missed.
+        #
+        # SystemExit and KeyboardInterrupt are not caught. argparse raises the first to
+        # refuse an argument and that refusal is already a usage error with its own status.
+        traceback.print_exc()
+        return FAILED
