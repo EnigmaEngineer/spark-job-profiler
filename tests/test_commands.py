@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 
+import sjp
 from sjp import cli, commands, eventlog, model, skew
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -193,7 +194,7 @@ def check_the_mapping_is_printed_at_the_indent_that_ships():
     _code, text = _run(["commands"])
     expected = ('{\n  "capture": "write",\n  "inventory": "read",'
                 '\n  "layout": "read",\n  "skew": "read",\n  "spill": "read",'
-                '\n  "stages": "read"\n}\n')
+                '\n  "stages": "read",\n  "version": "read"\n}\n')
     assert text == expected, repr(text)
 
 
@@ -258,13 +259,17 @@ def check_only_does_not_change_the_exit_status_or_the_tally():
     assert "showing 0 of" in clean, clean
 
 
-def check_skew_prints_one_line_per_stage_and_metric_plus_three():
-    """The header, the tally and the worst line. A dropped row would otherwise be invisible."""
+def check_skew_prints_one_line_per_stage_and_metric_plus_four():
+    """The header, the tally, the contract line and the worst line.
+
+    Plus three until day 5 added the contract line under the tally. A dropped row would
+    otherwise be invisible, which is the reason this counts rather than samples.
+    """
     app = eventlog.profile(_only_log(SKEWED))
     _code, text = _run(["skew", _only_log(SKEWED)])
     kinds = len(skew.worst_by_kind(skew.scan(app)))
     assert kinds == 3, kinds
-    expected = len(app.stages) * len(skew.DEFAULT_METRICS) + 2 + kinds
+    expected = len(app.stages) * len(skew.DEFAULT_METRICS) + 3 + kinds
     assert len(text.strip().splitlines()) == expected, text
 
 
@@ -278,7 +283,91 @@ def check_skew_takes_one_metric_when_asked_for_one():
     stages = len(eventlog.profile(_only_log(SKEWED)).stages)
     _code, text = _run(["skew", _only_log(SKEWED), "--metric", "duration"])
     assert "records_read" not in text, text
-    assert len(text.strip().splitlines()) == stages + 3, text
+    assert len(text.strip().splitlines()) == stages + 4, text
+
+
+def check_a_metric_a_ratio_cannot_measure_is_refused_with_a_status_of_its_own():
+    """`ot-113` and `ot-094` together, and the status is the half that matters.
+
+    `--metric launch_time` used to print two even verdicts at 1.0000 and exit 0, which a
+    shell reads as a job with nothing wrong. `--metric executor_id` used to raise a
+    TypeError out of `statistics.median` and the interpreter exited 1, which a shell reads
+    as a stage that skewed. Both are now 2, which this command never returns as an answer.
+    """
+    for metric in ("launch_time", "executor_id", "failed", "durtaion"):
+        with _quiet() as caught:
+            code, text = _run(["skew", _only_log(SKEWED), "--metric", metric])
+        assert code == cli.REFUSED, (metric, code)
+        assert code not in (cli.OK, cli.FOUND), (metric, code)
+        assert text == "", (metric, text)
+        assert metric in caught.getvalue(), (metric, caught.getvalue())
+
+
+def check_a_refusal_happens_before_the_log_is_opened():
+    """A bad metric name costs a parse of nothing, and the path is never read."""
+    with _quiet() as caught:
+        code, text = _run(["skew", os.path.join(ROOT, "no-such-log"),
+                           "--metric", "launch_time"])
+    assert code == cli.REFUSED, code
+    assert text == "", text
+    assert "launch_time" in caught.getvalue(), caught.getvalue()
+
+
+def check_the_skew_output_names_the_build_and_the_set_the_status_was_counted_over():
+    code, text = _run(["skew", _only_log(SKEWED)])
+    lines = [line.strip() for line in text.strip().splitlines()]
+    # Directly under the tally, found rather than indexed, because the number of worst
+    # lines above it depends on how many units the log skewed on.
+    tally = [index for index, line in enumerate(lines) if line.endswith("undecided")]
+    assert len(tally) == 1, tally
+    assert lines[tally[0] + 1] == "sjp {}  exit 1 over metric set default {}".format(
+        sjp.__version__, skew.metric_set_id(skew.DEFAULT_METRICS)), lines[tally[0] + 1]
+    assert code == 1, code
+
+
+def check_a_narrowed_metric_set_is_reported_as_selected_with_its_own_id():
+    """The point of the id. The same log under two sets is two different questions."""
+    _code, full = _run(["skew", _only_log(SKEWED)])
+    _code, one = _run(["skew", _only_log(SKEWED), "--metric", "duration"])
+    assert "metric set default" in full, full
+    assert "metric set selected 1:" in one, one
+    assert skew.metric_set_id(skew.DEFAULT_METRICS) not in one, one
+
+
+def check_the_version_command_prints_the_contract_without_a_log():
+    code, text = _run(["version"])
+    assert code == 0, code
+    lines = text.strip().splitlines()
+    assert lines[0] == "sjp {}".format(sjp.__version__), lines[0]
+    assert lines[1] == "metric set default {}".format(
+        skew.metric_set_id(skew.DEFAULT_METRICS)), lines[1]
+    # One row per metric, naming the kind the set was derived from.
+    assert len(lines) == 2 + len(skew.DEFAULT_METRICS), lines
+    for metric in skew.DEFAULT_METRICS:
+        assert any(row.strip().startswith(metric) for row in lines[2:]), metric
+
+
+def check_a_command_that_raises_exits_on_a_status_that_is_not_an_answer():
+    """The collision this found. An unhandled exception left the interpreter to exit 1.
+
+    1 is what `sjp skew` returns for a stage that skewed and what `sjp spill` returns for
+    a job that spilled, so a crash and a finding were the same status. Driven through a
+    registry of our own, because the real commands no longer have a reachable crash.
+    """
+    saved = dict(cli.COMMANDS)
+    cli.COMMANDS.clear()
+    try:
+        cli.command("boom", cli.READ, "", probe=lambda store: [])(
+            lambda rest: 1 // 0)
+        with _quiet() as caught:
+            code, text = _run(["boom"])
+        assert code == cli.FAILED, code
+        assert code not in (cli.OK, cli.FOUND), code
+        assert text == "", text
+        assert "ZeroDivisionError" in caught.getvalue(), caught.getvalue()
+    finally:
+        cli.COMMANDS.clear()
+        cli.COMMANDS.update(saved)
 
 
 def check_the_capture_parser_requires_a_job():

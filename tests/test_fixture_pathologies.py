@@ -32,14 +32,19 @@ GROUPING_STAGE = 2
 # Each carries one the profiler's own output has.
 #
 # `wide` is 48 stages, and 48 times the 14 metric default set is the 672 verdicts the scan
-# produces. The line count is those plus the header, the tally and one worst line per unit.
-# Pinned because the whole reason the fixture exists is the size of that number.
+# produces. The line count is those plus the header, the tally, the contract line and one
+# worst line per unit. Pinned because the whole reason the fixture exists is the size of
+# that number.
+#
+# 675 and 4 until 2026-10-06. Day 5 put the build and the metric set id under the tally,
+# which is one line on every run of this command. Both figures are re-measured here rather
+# than incremented, and the day 2 post quoting 675 was accurate the day it was written.
 WIDE_STAGES = 48
 WIDE_VERDICTS = 672
-WIDE_LINES = 675
-# Measured 2026-10-03 with `--only skewed`. The header, the nothing skewed line, the tally
-# and the line saying the body is empty.
-WIDE_FILTERED_LINES = 4
+WIDE_LINES = 676
+# Measured 2026-10-06 with `--only skewed`. The header and the nothing skewed line, then
+# the tally and the contract line, then the line saying the body is empty.
+WIDE_FILTERED_LINES = 5
 
 # `small` at 600 rows. These two came off the deterministic half of the log and reproduced
 # across two separate captures to the record and to the byte, which is why they can be
@@ -233,7 +238,7 @@ def check_the_wide_fixture_still_carries_the_stage_count_it_was_captured_for():
     assert len(app.stages) == WIDE_STAGES, len(app.stages)
 
 
-def check_the_wide_fixture_still_prints_675_lines_and_answers_in_the_first_three():
+def check_the_wide_fixture_still_prints_every_verdict_and_answers_in_the_first_three():
     """This is `ot-095` after day 2, and the line count is deliberately unchanged.
 
     675 lines for a job with nothing wrong with it was never a length problem. The two
@@ -248,7 +253,8 @@ def check_the_wide_fixture_still_prints_675_lines_and_answers_in_the_first_three
     app = _app("wide")
     verdicts = skew.scan(app)
     assert len(verdicts) == WIDE_VERDICTS, len(verdicts)
-    lines = commands.skew_lines(app, verdicts, skew.DEFAULT_THRESHOLD)
+    lines = commands.skew_lines(app, verdicts, skew.DEFAULT_THRESHOLD,
+                                skew.DEFAULT_METRICS)
     assert len(lines) == WIDE_LINES, len(lines)
     assert "nothing skewed" in lines[1], lines[1]
     assert "skewed," in lines[2], lines[2]
@@ -257,18 +263,18 @@ def check_the_wide_fixture_still_prints_675_lines_and_answers_in_the_first_three
     assert "skewed," not in lines[-2], lines[-2]
 
 
-def check_filtering_the_wide_fixture_answers_in_four_lines():
+def check_filtering_the_wide_fixture_answers_in_five_lines():
     """`--only skewed` is what makes the wide fixture readable, and the figure is measured.
 
-    675 lines to 4 on a log where the answer is that nothing is skewed. The body goes to
-    zero rows and the fourth line says so, because a reader who filters still has to be
-    told what was left out.
+    676 lines to 5 on a log where the answer is that nothing is skewed. The body goes to
+    zero rows and the last line says so, because a reader who filters still has to be told
+    what was left out.
     """
     from sjp import commands, skew
 
     app = _app("wide")
     lines = commands.skew_lines(app, skew.scan(app), skew.DEFAULT_THRESHOLD,
-                                only=skew.SKEWED)
+                                skew.DEFAULT_METRICS, only=skew.SKEWED)
     assert len(lines) == WIDE_FILTERED_LINES, len(lines)
     assert lines[-1].strip() == "showing 0 of 672, skewed only", lines[-1]
 

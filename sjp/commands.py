@@ -9,9 +9,11 @@ one, so its parser is the only part of it anything can reach.
 """
 import argparse
 import os
+import sys
 
+import sjp
 from sjp import eventlog, layout, memory, model, skew
-from sjp.cli import READ, WRITE, command
+from sjp.cli import READ, REFUSED, WRITE, command
 
 CAPTURE_DEFAULT_ROWS = 2000000
 
@@ -172,7 +174,7 @@ def ratio_text(verdict):
     return "{:.4f}".format(verdict.ratio)
 
 
-def skew_lines(app, verdicts, threshold, only=None):
+def skew_lines(app, verdicts, threshold, metrics, only=None):
     """The answer, then the tally, then the evidence behind them.
 
     Takes the verdicts rather than computing them, so the lines and the command's exit
@@ -189,6 +191,12 @@ def skew_lines(app, verdicts, threshold, only=None):
 
     The tally prints even when a column is zero, because a summary that drops an empty
     outcome cannot report the absence of a problem.
+
+    `metrics` is here for the contract line under the tally and for nothing else. The
+    status this command returns is counted over whatever was judged, so a shell that
+    stored a 0 last week cannot read it without the set that produced it. Day 5 widened
+    the set from three names to fourteen and the same log changed its answer, with nothing
+    in the output saying so.
     """
     lines = ["{}  {}  threshold {}  {}".format(
         app.app_id, app.name, threshold, counted(len(verdicts), "verdict"))]
@@ -205,6 +213,11 @@ def skew_lines(app, verdicts, threshold, only=None):
     tally = skew.counts(verdicts)
     lines.append("  {} skewed, {} even, {} undecided".format(
         tally[skew.SKEWED], tally[skew.EVEN], tally[skew.UNDECIDED]))
+    # The status comes from `skew.exit_status` rather than from the tally above it, so the
+    # printed number and the returned one cannot be two readings of the same thing.
+    lines.append("  sjp {}  exit {} over metric set {} {}".format(
+        sjp.__version__, skew.exit_status(verdicts),
+        skew.metric_set_label(metrics), skew.metric_set_id(metrics)))
 
     body = skew.ranked(verdicts if only is None else skew.only(verdicts, only))
     if only is not None:
@@ -223,12 +236,48 @@ def skew_command(rest):
     args = skew_parser().parse_args(rest)
 
     metrics = tuple(args.metrics) if args.metrics else skew.DEFAULT_METRICS
+    try:
+        skew.refuse_unmeasured(metrics)
+    except skew.MetricRefused as refusal:
+        # Refused before the log is opened, so a bad metric name costs a parse of nothing.
+        #
+        # 2 and not 0 or 1. Those two are this command's answer about the job and a
+        # refusal is not an answer. Before today `--metric executor_id` crashed and the
+        # interpreter exited 1, which a shell reads as a stage that skewed.
+        print(refusal, file=sys.stderr)
+        return REFUSED
     app = eventlog.profile(args.path)
     verdicts = skew.scan(app, metrics, args.threshold)
-    for line in skew_lines(app, verdicts, args.threshold, args.only):
+    for line in skew_lines(app, verdicts, args.threshold, metrics, args.only):
         print(line)
-    # Exit 1 when something skewed, so this is usable from a shell that checks a status.
-    return 1 if skew.counts(verdicts)[skew.SKEWED] else 0
+    return skew.exit_status(verdicts)
+
+
+def version_parser():
+    parser = argparse.ArgumentParser(prog="sjp version")
+    return parser
+
+
+@command("version", READ, "the build, and the metric set the skew status is counted over",
+         probe=lambda store: [])
+def version_command(rest):
+    """The exit status contract, without needing a log to read it off.
+
+    `sjp skew` prints the same two facts on every run, and a caller deciding whether a
+    status it stored last week still means what it meant should not have to find a log and
+    pay for a parse to ask. The kinds are listed because the set is derived from them, so
+    the list is the reason the id is what it is rather than a restatement of it.
+
+    A parser with no arguments, so a trailing word is refused rather than ignored. That is
+    the rule the `commands` word already follows.
+    """
+    version_parser().parse_args(rest)
+    print("sjp {}".format(sjp.__version__))
+    print("metric set {} {}".format(skew.metric_set_label(skew.DEFAULT_METRICS),
+                                    skew.metric_set_id(skew.DEFAULT_METRICS)))
+    for metric in skew.DEFAULT_METRICS:
+        print("  {:<18} {}".format(metric, model.kind_of(metric)))
+    return 0
 
 
 def spill_parser():
