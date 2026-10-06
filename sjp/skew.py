@@ -34,6 +34,7 @@ kind declared on every field of the task record. The separating range above is s
 over the three metrics it was measured on, because widening it is a measurement and not a
 rename. `tests/test_skew.py` recomputes it.
 """
+import hashlib
 import math
 from dataclasses import dataclass
 
@@ -130,6 +131,99 @@ FLOORS[model.MILLIS] = MILLIS_FLOOR
 DEFAULT_METRICS = model.QUANTITIES
 
 
+class MetricRefused(Exception):
+    """A caller asked for a verdict on something a median relative ratio cannot measure."""
+
+
+def refuse_unmeasured(metrics):
+    """Raise unless every name is a quantity a ratio means something for.
+
+    This lives in the module that decides rather than in the command that prints, because
+    the command printing a refusal while `scan` still answered would leave the defect in
+    place for anything importing this.
+
+    `--metric launch_time` was accepted for eleven days. Measured on 2026-10-03 it read
+    1.0000 on stage 1 and stage 2 of the small log, off values near 1790970484000, which
+    is what a ratio over two clock readings is by construction. `--metric executor_id`
+    was worse. It reached `statistics.median` and raised a TypeError.
+
+    Every refused name is reported rather than the first, because a caller who fixes one
+    and runs again to find a second has been told half the answer twice.
+    """
+    refusals = []
+    for metric in metrics:
+        try:
+            kind = model.kind_of(metric)
+        except model.UnexpectedLog:
+            refusals.append("refused {}. not a task quantity".format(metric))
+            continue
+        if kind not in model.MEASURED:
+            refusals.append("refused {}. a declared {} rather than a measured quantity".format(
+                metric, kind))
+    if refusals:
+        raise MetricRefused("\n".join(refusals))
+
+
+def metric_set_id(metrics):
+    """A short stable name for exactly the set of metrics a scan judged.
+
+    `sjp skew` exits 1 when anything skewed and the skew is counted over whatever was
+    judged, so the status cannot be read without knowing the set. A hand written version
+    cannot carry that. The set is derived from the kind declared on each field of
+    `model.Task`, which means a field added there widens it with nobody touching this
+    module, and a hand written number would still read the same afterwards. A digest of
+    the names cannot drift from the names.
+
+    Sorted before hashing. Judging the same fourteen metrics in a different order asks the
+    same question and should not read as a different contract.
+
+    Eight hex characters, which separates the handful of sets this tool will ever have.
+    It is an identity rather than a defence against somebody building a collision.
+    """
+    joined = "\n".join(sorted(metrics))
+    return "{}:{}".format(len(metrics),
+                          hashlib.sha256(joined.encode("utf-8")).hexdigest()[:8])
+
+
+def metric_set_label(metrics):
+    """Whether a scan judged the set this tool chose or a set the caller named.
+
+    Derived by comparison rather than passed down as a flag, so fourteen `--metric` flags
+    naming the default set are reported as the default set. The id is the same either way
+    and the label would otherwise disagree with it.
+    """
+    return "default" if tuple(metrics) == tuple(DEFAULT_METRICS) else "selected"
+
+
+# Every default metric set this tool has shipped, oldest first, against the version that
+# shipped it.
+#
+# `3:5f2a4f77` is records read and duration and memory spilled, the three names I chose.
+# Read out of commit 4a5d5c0 rather than out of memory. `14:e575855f` is the derived set.
+# The same log hands a shell a different status under the two, which is the only reason
+# this list is worth keeping.
+#
+# `tests/test_skew.py` asserts the live set is the last entry here and that its version is
+# `sjp.__version__`. Widening the set and not recording it fails the suite.
+METRIC_SET_HISTORY = (
+    ("0.1.0", "3:5f2a4f77"),
+    ("0.2.0", "14:e575855f"),
+)
+
+
+def exit_status(verdicts):
+    """The status `sjp skew` returns to a shell.
+
+    Here rather than in the command so the line that prints the status and the value the
+    command returns cannot be computed twice and disagree. Same reason `skew_lines` takes
+    the verdicts instead of scanning a second time.
+
+    The two values are `cli.OK` and `cli.FOUND` and a check asserts that. This module does
+    not import `sjp.cli`, because the arithmetic here should not depend on an entry point.
+    """
+    return 1 if counts(verdicts)[SKEWED] else 0
+
+
 def plain(value):
     """A measurement as digits a person can read back against the log.
 
@@ -181,6 +275,13 @@ def judge(stage, metric, threshold=DEFAULT_THRESHOLD, floors=None):
         # A ratio of 1.0 is what a single task and a perfectly even stage both read, so a
         # threshold at or below it calls everything skewed and means nothing.
         raise ValueError("threshold {} is at or below an even stage's ratio".format(threshold))
+    # Again here rather than only in `scan`, because a caller reaching one stage directly
+    # is the caller least likely to have checked.
+    #
+    # `model.kind_of` walks twenty fields and the wide log calls this 672 times. Measured
+    # 2026-10-06 over 20 runs, the scan goes from a median of 2.9 ms to 4.2 ms, so the
+    # duplicate guard is 1.3 ms on the widest log in the repo. Paid.
+    refuse_unmeasured([metric])
 
     values = stage.values(metric)
     tasks = len(values)
@@ -218,7 +319,12 @@ def judge(stage, metric, threshold=DEFAULT_THRESHOLD, floors=None):
 
 
 def scan(app, metrics=DEFAULT_METRICS, threshold=DEFAULT_THRESHOLD, floors=None):
-    """Every stage against every metric, in stage order."""
+    """Every stage against every metric, in stage order.
+
+    The whole metric list is refused up front rather than one stage at a time, so a caller
+    naming three bad metrics is told about three rather than about the first one.
+    """
+    refuse_unmeasured(metrics)
     return [judge(stage, metric, threshold, floors)
             for stage in app.stages for metric in metrics]
 
@@ -249,14 +355,15 @@ def rank_key(verdict):
     The cost is that the body cannot say which single verdict is worst. The worst lines
     answer that per unit and there is no cross unit answer to give.
 
-    Kinds come from `model.KINDS` rather than `model.MEASURED` because `scan` will judge
-    any declared quantity a caller names and `--metric launch_time` is accepted today.
-    That verdict is arithmetic on a clock reading and sorting it is not what makes it
-    wrong, so it sorts after the measured kinds instead of raising here.
+    Kinds come from `model.MEASURED`. They came from `model.KINDS` for two days, so that a
+    verdict on `launch_time` would sort after the measured ones rather than raise, which
+    was a sort working around a defect that was not the sort's. `judge` refuses a
+    non measured metric now, so no verdict carrying one can reach here, and
+    `check_a_verdict_on_a_non_measured_kind_cannot_be_built` is what says so.
     """
     ratio = verdict.ratio
     return (OUTCOMES.index(verdict.outcome),
-            model.KINDS.index(model.kind_of(verdict.metric)),
+            model.MEASURED.index(model.kind_of(verdict.metric)),
             # Descending, so the worst is first. An unbounded ratio goes to -inf and leads
             # its kind. None has nothing to order by and goes last.
             -ratio if ratio is not None else math.inf,

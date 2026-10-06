@@ -14,6 +14,7 @@ import math
 import os
 import statistics
 
+import sjp
 from sjp import eventlog, model, skew
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -487,18 +488,106 @@ def check_an_undecided_verdict_sorts_last_inside_its_kind_rather_than_crashing()
     assert verdicts[-len(undecided):] == undecided
 
 
-def check_ranking_accepts_a_metric_whose_kind_is_not_measured():
-    """`scan` judges any declared quantity a caller names and launch_time is an instant.
+def check_a_scan_refuses_every_metric_a_ratio_cannot_measure():
+    """The replacement for the day 2 check that asserted the opposite.
 
-    That verdict is arithmetic on a clock reading and it should not exist. Sorting is not
-    where that gets decided, so `rank_key` orders it after the measured kinds rather than
-    raising. Recorded as a thread on day 2 rather than fixed here.
+    That one pinned `scan` judging `launch_time` and `rank_key` sorting the verdict after
+    the measured kinds. It was right about the sort and it was describing a defect, which
+    is why it is gone rather than relaxed.
     """
-    verdicts = skew.scan(_app(SKEWED_DIR), ("launch_time", "records_read"))
-    ranked = skew.ranked(verdicts)
-    assert len(ranked) == len(verdicts)
-    instants = [v for v in ranked if model.kind_of(v.metric) == model.INSTANT]
-    assert instants, "launch_time is declared an instant"
+    for metric, word in (("launch_time", "instant"),
+                         ("executor_id", "identity"),
+                         ("failed", "flag")):
+        try:
+            skew.scan(_app(SKEWED_DIR), (metric, "records_read"))
+        except skew.MetricRefused as refusal:
+            assert metric in str(refusal), str(refusal)
+            assert word in str(refusal), str(refusal)
+        else:
+            raise AssertionError("{} was judged".format(metric))
+
+
+def check_a_refusal_names_every_bad_metric_and_not_only_the_first():
+    try:
+        skew.scan(_app(SKEWED_DIR), ("launch_time", "records_read", "executor_id", "nope"))
+    except skew.MetricRefused as refusal:
+        lines = str(refusal).splitlines()
+        assert len(lines) == 3, lines
+        assert "not a task quantity" in lines[2], lines
+    else:
+        raise AssertionError("three bad metrics were judged")
+
+
+def check_a_single_stage_cannot_bypass_the_refusal_by_calling_judge():
+    """`scan` is not the only door. A caller holding one stage reaches `judge` directly."""
+    stage = _app(SKEWED_DIR).stages[0]
+    try:
+        skew.judge(stage, "launch_time")
+    except skew.MetricRefused:
+        pass
+    else:
+        raise AssertionError("judge answered on a clock reading")
+
+
+def check_a_verdict_on_a_non_measured_kind_cannot_be_built():
+    """What `rank_key` relies on now that it indexes `model.MEASURED` again.
+
+    `rank_key` would raise a bare ValueError on such a verdict. Nothing should be able to
+    hand it one, and this is the check that sentence points at.
+    """
+    app = _app(SKEWED_DIR)
+    for name in model.QUANTITIES:
+        assert model.kind_of(name) in model.MEASURED, name
+    verdicts = skew.scan(app)
+    assert verdicts, "the skewed log has stages"
+    for verdict in verdicts:
+        assert model.kind_of(verdict.metric) in model.MEASURED, verdict.metric
+    assert len(skew.ranked(verdicts)) == len(verdicts)
+
+
+def check_the_metric_set_id_is_the_count_and_a_digest_of_the_names():
+    one = skew.metric_set_id(("records_read", "duration"))
+    assert one.startswith("2:"), one
+    assert len(one) == len("2:") + 8, one
+    # Order independent. The same two metrics asked for backwards is the same question.
+    assert skew.metric_set_id(("duration", "records_read")) == one
+    # And a different set is a different id, which is the only thing it has to do.
+    assert skew.metric_set_id(("records_read",)) != one
+
+
+def check_the_live_metric_set_is_the_last_entry_in_the_history():
+    """The reason the version digit means anything.
+
+    `DEFAULT_METRICS` is derived from the kinds declared on `model.Task`, so a field added
+    there widens the set with nobody editing `sjp.skew`. This is what fails when that
+    happens and the history was not updated.
+    """
+    version, set_id = skew.METRIC_SET_HISTORY[-1]
+    assert skew.metric_set_id(skew.DEFAULT_METRICS) == set_id, (
+        "the default set is now {} and the history ends at {}".format(
+            skew.metric_set_id(skew.DEFAULT_METRICS), set_id))
+    assert sjp.__version__ == version, (sjp.__version__, version)
+
+
+def check_the_history_records_the_three_names_the_tool_started_with():
+    """Read out of commit 4a5d5c0 rather than out of memory, then hashed here."""
+    first_version, first_id = skew.METRIC_SET_HISTORY[0]
+    assert first_version == "0.1.0", first_version
+    assert skew.metric_set_id(("records_read", "duration", "memory_spilled")) == first_id
+    assert first_id != skew.METRIC_SET_HISTORY[-1][1], "the set never changed"
+
+
+def check_the_label_says_default_only_when_the_set_is_the_default_one():
+    assert skew.metric_set_label(skew.DEFAULT_METRICS) == "default"
+    # Named one at a time, which is what fourteen --metric flags produce.
+    assert skew.metric_set_label(tuple(skew.DEFAULT_METRICS)) == "default"
+    assert skew.metric_set_label(("duration",)) == "selected"
+
+
+def check_the_exit_status_is_the_whole_scan_and_nothing_else():
+    assert skew.exit_status(skew.scan(_app(SKEWED_DIR))) == 1
+    assert skew.exit_status(skew.scan(_app(BALANCED_DIR))) == 0
+    assert skew.exit_status([]) == 0
 
 
 def check_only_narrows_the_body_and_leaves_the_tally_alone():
