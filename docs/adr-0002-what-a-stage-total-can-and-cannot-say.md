@@ -16,9 +16,9 @@ balanced job over the same 8,000,000 rows.
 
 ## The totals are exactly right
 
-Twelve accumulables map onto a field the model keeps per task. Over six stages, every one
-of them that the log reported equals the sum of that field over the stage's tasks. Not
-close. Equal.
+Twelve accumulables map onto a field the model keeps per task, and which twelve is read off
+the fields rather than kept in a list. Over six stages, every one of them that the log
+reported equals the sum of that field over the stage's tasks. Not close. Equal.
 
 ```
 skewed    stage totals: 24 present, 12 absent, 0 disagree with the task sums
@@ -81,12 +81,95 @@ the task reading is the one that matches what happened.
 A stage total is the wrong number for a question about memory pressure, and it is wrong in
 the direction that makes the healthy job look like the problem.
 
+## Twelve of what
+
+The map onto task fields was twelve entries kept beside the record. Twelve is the size of
+the map and it is not a fraction of anything until the denominator is printed, and nothing
+printed one. The question of what the other accumulables are was a judgement nobody could
+fail.
+
+Two derivations were measured before the map was declared on the fields, because a
+generated map would have been better than a declared one.
+
+No command prints this pair together, so it is a table rather than a fence.
+
+| derivation | reaches |
+|---|---|
+| camel case the task field name | 1 of 12 |
+| build the name from the task metrics leaf path | 14 of 34 leaves |
+
+`scripts/accumulable_probe.py` prints both counts and the misses behind them.
+
+The first reaches `executorRunTime` and nothing else, because that is the only field in
+the record whose name was already Spark's. The second does better and the misses are not a
+pattern anybody could code around. `Total Records Read` has a word Spark drops.
+`JVM GC Time` capitalises differently in the two spellings. The push based shuffle names
+reverse their word order between the task metrics block and the accumulable name. So the
+two spellings are not related by a rule and the honest form is a declaration on the field,
+which a new field cannot arrive without answering.
+
+What that buys is a completeness report rather than a judgement. Every name on a stage is
+one of four things.
+
+The counts are over all eight committed logs and the probe prints them. The descriptions
+are mine, so this is a table.
+
+| class | what it means | names |
+|---|---|---|
+| kept | the model keeps the quantity per task | 12 |
+| read past | a task metric with a reason recorded for dropping it | 19 |
+| plan metric | belongs to one plan node rather than to the stage | 15 |
+| unruled | a task metric nobody here has ruled on | 0 |
+
+The twelve kept plus the nineteen read past cover every task metric the eight committed
+logs carry, and a check fails on any that they do not. The `unruled` class is reported
+rather than refused, because a log from a newer Spark will hold one and a profiler that
+will not read such a log is worse than one that names what it skipped.
+
+Seven of the nineteen read past have been nonzero somewhere here and twelve are zero on
+every task of every log. The twelve are nine push based shuffle names and three remote
+fetch names, none of which can move on one machine. Their zeros are a fact about where this
+ran rather than evidence that keeping them would be useless.
+
+## The name is not an address for a plan metric
+
+The grouping stage of the skewed job carries 37 accumulable rows under 36 names. Ten of
+the twelve kept are there and two never moved. Of the 26 it does not keep, 17 are task
+metrics read past and 9 belong to a plan node. So the old reading of 37 as twelve plus
+twenty five subtracted the size of the map from the contents of one stage and conflated
+two different absences.
+
+The nine plan node metrics are the sharper half. Spark writes them into the same list under
+names like `local bytes read` and `peak memory`. Strip the namespace and the capitals off
+and three of them are byte identical to a task metric leaf.
+
+| plan metric name | spells the same leaf as |
+|---|---|
+| fetch wait time | `internal.metrics.shuffle.read.fetchWaitTime` |
+| local bytes read | `internal.metrics.shuffle.read.localBytesRead` |
+| records read | `internal.metrics.input.recordsRead` and `internal.metrics.shuffle.read.recordsRead` |
+
+The stage total reader answered those names with a plan node's number. Six plan metric
+names answered on 36 stages or more and two of them were never refused at all, so the
+ambiguity was live rather than theoretical. `peak memory` is the one that would have cost
+the most, because the stage total a word away from it is the metric this document is about.
+
+`recordsread` being the leaf of two task metrics is why the collision report groups rather
+than picking one. The first version of that report keyed a dictionary on the leaf spelling
+and printed one twin for a name that has two, which is this document's own finding made in
+the code written to describe it.
+
 ## Decision
 
 The model builds from task events. `Stage.peak_memory` is the largest peak any one task
 reached and never the reported total. Accumulables are kept as records rather than a
 dictionary. A total that is absent reads as zero, and a total whose name appears twice
 raises rather than answering.
+
+The accumulable a task field answers for is declared on the field, so the map is read off
+the record. A task metric the model does not keep carries a recorded reason. A name outside
+the task metric namespace is refused by the stage total reader, and a plan metric is read
+by accumulator id instead.
 
 ## Consequences
 

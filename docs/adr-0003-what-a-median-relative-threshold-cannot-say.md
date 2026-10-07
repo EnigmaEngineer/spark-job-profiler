@@ -149,8 +149,9 @@ not multiply.
 
 ## Still open
 
-`STAGE_TOTAL_FIELDS` maps twelve accumulables of the thirty seven the grouping stage
-carries. The detector reads task fields rather than stage totals, so nothing today depends
+`STAGE_TOTAL_FIELDS` is twelve entries read off the task fields, against a grouping stage
+carrying thirty seven accumulable rows of which nine belong to a plan node rather than to
+the stage. The detector reads task fields rather than stage totals, so nothing today depends
 on that map. It stays open.
 
 The ratio threshold is one number for every metric. A spill ratio and a duration ratio
