@@ -189,6 +189,7 @@ local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
       spilled       117440288 memory  61304287 disk
       peak memory   0 largest task  0 summed by the stage
       stage totals  12 mapped, 4 absent, 0 disagree with the tasks
+      accumulables  19 rows, 8 kept, 5 read past, 6 plan, 0 unruled
   stage 1  8 of 8 tasks  2278 ms wall
       duration ms   median 492.0  max 855  spread 1.74
       records read  median 1000000.0  max 1000000  spread 1.00
@@ -196,6 +197,7 @@ local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
       spilled       0 memory  0 disk
       peak memory   0 largest task  0 summed by the stage
       stage totals  12 mapped, 5 absent, 0 disagree with the tasks
+      accumulables  35 rows, 8 kept, 18 read past, 9 plan, 0 unruled
   stage 2  8 of 8 tasks  3879 ms wall
       duration ms   median 207.0  max 3048  spread 14.72
       records read  median 156784.0  max 6932663  spread 44.22
@@ -203,6 +205,8 @@ local-1790267120237  sjp-skewed  2 cores  14063 ms  1 job  3 stages
       spilled       620755808 memory  88088795 disk
       peak memory   377486768 largest task  562035856 summed by the stage
       stage totals  12 mapped, 3 absent, 0 disagree with the tasks
+      accumulables  37 rows, 10 kept, 17 read past, 9 plan, 0 unruled
+        number of output rows appears more than once, so the id is the key
 ```
 
 Nothing there is a verdict. A spread of 44.22 is a measurement beside the thing it should
@@ -239,6 +243,64 @@ damage is `internal.metrics.peakExecutionMemory`, because it is a sum of per tas
 and the balanced job's stage total is more than twice the skewed job's while the balanced
 job spilled nothing. `docs/adr-0002-what-a-stage-total-can-and-cannot-say.md` has the
 numbers and the two other traps in that list.
+
+### Twelve of how many
+
+Twelve is the size of the map. It is not a fraction of anything until the denominator is
+printed, and for a long time it was not. The `accumulables` line is that denominator and
+`scripts/accumulable_probe.py` is where it comes from.
+
+```
+the map, read off the fields
+  12 task fields carry a stage total, 8 do not
+  19 task metrics are read past, with a reason recorded for each
+every accumulable name over all 8 logs
+  kept        12
+  read past   19
+  plan metric 15
+  unruled     0
+  46 distinct names in all
+what the model reads past, and whether it has ever moved here
+  7 of 19 nonzero somewhere, 12 zero on every stage of every log
+```
+
+Every name an accumulable list carries is one of four things. A task metric the model keeps
+per task. A task metric it reads past, with the reason written down. A metric belonging to
+one plan node rather than to the stage. Or a task metric nobody here has ruled on, which no
+committed log holds and which a log from a newer Spark would.
+
+That last class is reported rather than refused. A profiler that will not read a log because
+it met an unfamiliar metric is worse than one that names what it skipped.
+
+The twelve read past that have never moved are the nine push based shuffle names and three
+remote fetch names. None of them can move on one machine, so their zeros say nothing about
+whether keeping them would be worth it. The seven that have moved are the honest gap.
+
+### The name is not an address for a plan metric
+
+Spark writes a plan node's own metrics into the same list, under names like
+`local bytes read` and `peak memory`. Strip the namespace and the capitals off and three of
+them are byte identical to a task metric leaf, and two of those reach a metric the model
+keeps.
+
+```
+plan metric names that spell the same thing as a task metric
+  fetch wait time    answered on  36 stages, and spells
+      read past   internal.metrics.shuffle.read.fetchWaitTime
+  local bytes read   answered on  36 stages, and spells
+      kept        internal.metrics.shuffle.read.localBytesRead
+  records read       answered on  36 stages, and spells
+      read past   internal.metrics.input.recordsRead
+      kept        internal.metrics.shuffle.read.recordsRead
+  task metric leaf spellings carried by more than one name: 1
+      recordsread is the leaf of internal.metrics.input.recordsRead, internal.metrics.shuffle.read.recordsRead
+```
+
+The stage total reader used to answer those names with a plan node's number. `peak memory`
+is the one that would have cost the most, because the stage total a word away from it is
+the metric this README already says ranks the wrong job as the memory problem. It is
+refused now, and a plan metric is read by accumulator id instead, which is the address a
+plan node actually hands out.
 
 ## Naming the stage that skewed
 
@@ -1025,13 +1087,15 @@ and the next section is what made it wrong.
 
 ### A floor cannot be placed from one end of a range
 
-`skew.FLOORS` carries a millisecond floor of 50 and leaves bytes and counts at `None`.
-`None` means no floor, so a byte difference of any size is judged on its ratio alone.
+`skew.FLOORS` carried a millisecond floor of 50 and left bytes and counts at `None`.
+`None` means no floor, so a byte difference of any size was judged on its ratio alone.
 
-The `small` job runs the skewed distribution over 600 rows.
+The `small` job runs the skewed distribution over 600 rows. Asked for its skewed verdicts
+on that tree it answered like this. The lines are real output and the tree is gone, so the
+fence carries no command. What the same command prints today is the second half of the
+before and after pair further down.
 
 ```
-$ python -m sjp skew tests/fixtures/eventlogs/small/* --only skewed
 local-1790970475322  sjp-small  threshold 4.0  42 verdicts
   worst count   stage 2 on records_read at 43.1667
   worst bytes   stage 2 on local_bytes_read at 9.3934
@@ -1044,7 +1108,7 @@ local-1790970475322  sjp-small  threshold 4.0  42 verdicts
   skewed    stage 1  executor_run_time     4.5714  largest task 224 against a median of 49
 ```
 
-The two at the top are correct and useless. 7,449 bytes really is 9.4 times 793 bytes, and
+The two at the top were correct and useless. 7,449 bytes really is 9.4 times 793 bytes, and
 518 records really is 43 times 12. Neither is a thing anyone would act on.
 
 The millisecond floor was placed on evidence. The sweep `{0: 11, 30: 8, 50: 8, 100: 7,
@@ -1329,20 +1393,21 @@ argument and that is already a usage error with a status of its own.
 
 ```
 python tests/run_all.py
-425 passed, 0 failed, 425 checks
+448 passed, 0 failed, 448 checks
 ```
 
-Every check is graded by a mutation pass rather than counted. Three rows were re-run on
-2026-10-06 after the metric set work, which are `sjp/skew.py` and `sjp/cli.py` and
-`sjp/commands.py`. `jobs/sample.py` is from 2026-10-05. The other eight are earlier passes.
+Every check is graded by a mutation pass rather than counted. Three rows are from today,
+which are `sjp/model.py` and `sjp/commands.py` and the new `scripts/accumulable_probe.py`.
+`sjp/skew.py` and `sjp/cli.py` were re-run on 2026-10-06 and `jobs/sample.py` on
+2026-10-05. The rest are earlier passes.
 
 ```
 sjp/layout.py: 114 mutation sites, running 0 to 114
 114 killed, 0 survived, 0 ungraded, 114 graded
 sjp/bench.py: 38 mutation sites, running 0 to 38
 34 killed, 4 survived, 0 ungraded, 38 graded
-sjp/model.py: 44 mutation sites, running 0 to 44
-44 killed, 0 survived, 0 ungraded, 44 graded
+sjp/model.py: 91 mutation sites, running 0 to 91
+91 killed, 0 survived, 0 ungraded, 91 graded
 sjp/plan.py: 33 mutation sites, running 0 to 33
 33 killed, 0 survived, 0 ungraded, 33 graded
 sjp/commands.py: 30 mutation sites, running 0 to 30
@@ -1359,12 +1424,21 @@ sjp/contract.py: 6 mutation sites, running 0 to 6
 6 killed, 0 survived, 0 ungraded, 6 graded
 scripts/fixture_probe.py: 20 mutation sites, running 0 to 20
 19 killed, 1 survived, 0 ungraded, 20 graded
+scripts/accumulable_probe.py: 81 mutation sites, running 0 to 81
+55 killed, 26 survived, 0 ungraded, 81 graded
 jobs/sample.py: 35 mutation sites, running 0 to 35
 14 killed, 21 survived, 0 ungraded, 35 graded
 ```
 
-The last row went from 2 of 35 to 14 of 35 and the reason is the one thing in this repo I
-got most wrong.
+The new row is 55 of 81 and the 26 that survive are in the function that prints. Saying so
+is how the row below it got explained away for eleven days, so the rest of that sentence
+matters. The figures that function prints are graded by a separate gate. It compares every
+numeric line in this file against captured output. The two subtractions that function used
+to do inline are computed by a function the suite drives now, and what is left unguarded is
+formatting.
+
+`jobs/sample.py` went from 2 of 35 to 14 of 35 and the reason is the one thing in this repo
+I got most wrong.
 
 For eleven days, which is every day this repo has existed, that row was explained away. The
 explanation was that every surviving mutant
@@ -1449,9 +1523,17 @@ An event log discloses the driver's working directory, the operating system user
 the job and the full classpath. The committed logs are unedited and carry all three.
 Editing them would make them something other than real logs.
 
-The model maps twelve accumulables onto a field it keeps per task. The grouping stage of
-the skewed job carries thirty seven. The other twenty five are not read, and nothing here
-argues that they are uninteresting.
+Closed in v2. The map onto task fields was twelve entries kept beside the record, and this
+section used to say the grouping stage carries thirty seven and the other twenty five are
+not read. That subtraction mixed the size of the map with the contents of one stage. Ten of
+the twelve are on that stage and two never moved, and of the twenty six names it does not
+keep, seventeen are task metrics it reads past and nine belong to a plan node and were never
+candidates. The accumulable is declared on the task field now, so the map is read off the
+record and a field cannot arrive without answering the question.
+
+What is still open is which of the seven task metrics that have moved here are worth
+keeping. `resultSize` and `shuffle.write.writeTime` are the two a recommendation would reach
+for first.
 
 Closed in v2. `sjp skew` used to print every verdict with no ranking and no filter, with the
 summary last, so the wider the log the further a reader scrolled to reach it. The summary is
@@ -1551,7 +1633,7 @@ one.
 detector and it is a property of these fixtures rather than of the rule. A real job with two
 hundred partitions per stage would clear the task floor everywhere.
 
-The detector reads task fields and never a stage total, so the twelve of thirty seven above
+The detector reads task fields and never a stage total, so which accumulables the map covers
 changes no verdict today. A recommendation that reads a stage total will change that.
 
 `sjp stages` reports a stage that was submitted and never completed with whatever the log
