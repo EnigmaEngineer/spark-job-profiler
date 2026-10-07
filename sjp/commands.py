@@ -95,6 +95,14 @@ def stage_lines(app):
         off = model.disagreements(stage)
         lines.append("      {:<13} {} mapped, {} absent, {} disagree with the tasks".format(
             "stage totals", len(model.STAGE_TOTAL_FIELDS), len(absent), len(off)))
+        # The denominator, so a reader can see how much of the stage the map is. Without
+        # it the line above is twelve out of a number nobody prints.
+        cover = model.coverage(stage)
+        lines.append("      {:<13} {} rows, {} kept, {} read past, {} plan, {} unruled".format(
+            "accumulables", cover.rows, len(cover.kept), len(cover.read_past),
+            len(cover.plan), len(cover.unruled)))
+        for name in cover.repeated:
+            lines.append("        {} appears more than once, so the id is the key".format(name))
         for name, reported, summed in off:
             lines.append("        {} reports {} against {} over the tasks".format(
                 name, reported, summed))
