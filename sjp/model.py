@@ -78,10 +78,22 @@ FLAG = "flag"
 MEASURED = (COUNT, BYTES, MILLIS)
 KINDS = MEASURED + (IDENTITY, INSTANT, FLAG)
 
+# Every accumulable Spark writes for a task metric sits under this prefix. A name without
+# it belongs to one plan node, which is a different quantity reached by a different
+# address. `classify` is where that split gets stated rather than assumed.
+TASK_METRIC = "internal.metrics."
 
-def measured(kind):
-    """A field whose values a median relative ratio can be computed over."""
-    return field(metadata={"kind": kind})
+
+def measured(kind, total=None):
+    """A field, the kind of quantity it holds, and the stage accumulable for the same thing.
+
+    `total` is declared on the field rather than worked out from the field name, because
+    the two spellings are not related by a rule. Camel casing the field name reproduces
+    exactly one of the twelve real names. Building the name out of the task metrics leaf
+    path instead reaches fourteen of thirty four. `scripts/accumulable_probe.py` measures
+    both, so the reason this is a declaration is a number rather than a preference.
+    """
+    return field(metadata={"kind": kind, "total": total})
 
 
 @dataclass(frozen=True)
@@ -93,18 +105,18 @@ class Task:
     executor_id: str = measured(IDENTITY)
     launch_time: int = measured(INSTANT)
     finish_time: int = measured(INSTANT)
-    executor_run_time: int = measured(MILLIS)
-    deserialize_time: int = measured(MILLIS)
-    serialize_time: int = measured(MILLIS)
-    gc_time: int = measured(MILLIS)
-    peak_memory: int = measured(BYTES)
-    memory_spilled: int = measured(BYTES)
-    disk_spilled: int = measured(BYTES)
-    records_read: int = measured(COUNT)
-    local_bytes_read: int = measured(BYTES)
-    remote_bytes_read: int = measured(BYTES)
-    records_written: int = measured(COUNT)
-    bytes_written: int = measured(BYTES)
+    executor_run_time: int = measured(MILLIS, TASK_METRIC + "executorRunTime")
+    deserialize_time: int = measured(MILLIS, TASK_METRIC + "executorDeserializeTime")
+    serialize_time: int = measured(MILLIS, TASK_METRIC + "resultSerializationTime")
+    gc_time: int = measured(MILLIS, TASK_METRIC + "jvmGCTime")
+    peak_memory: int = measured(BYTES, TASK_METRIC + "peakExecutionMemory")
+    memory_spilled: int = measured(BYTES, TASK_METRIC + "memoryBytesSpilled")
+    disk_spilled: int = measured(BYTES, TASK_METRIC + "diskBytesSpilled")
+    records_read: int = measured(COUNT, TASK_METRIC + "shuffle.read.recordsRead")
+    local_bytes_read: int = measured(BYTES, TASK_METRIC + "shuffle.read.localBytesRead")
+    remote_bytes_read: int = measured(BYTES, TASK_METRIC + "shuffle.read.remoteBytesRead")
+    records_written: int = measured(COUNT, TASK_METRIC + "shuffle.write.recordsWritten")
+    bytes_written: int = measured(BYTES, TASK_METRIC + "shuffle.write.bytesWritten")
     failed: bool = measured(FLAG)
 
     @property
@@ -215,12 +227,27 @@ class Stage:
         return self.largest("peak_memory")
 
     def reported_total(self, name):
-        """The stage's own total for an internal metric.
+        """The stage's own total for one task metric.
 
         Absent means zero, because Spark drops an accumulable that never moved. Raises
         when the name appears more than once, since a caller asking for one number should
         be told the question was ambiguous rather than handed whichever came first.
+
+        A name outside the task metric namespace is refused rather than answered. Spark
+        writes a plan node's own metrics into the same list under names like
+        `local bytes read` and `peak memory`, one word away from a stage total and
+        measuring one node rather than the whole stage. Six such names answered with a
+        plan node's value on 36 stages or more before this refusal existed, and two of
+        them never got refused at all, so the ambiguity was live rather than theoretical.
+        `peak memory` is the one that would have cost the most, because the stage total a
+        word away from it is the one metric in this file known to rank the wrong job as
+        the memory problem. A plan metric is addressed by accumulator id through
+        `Application.accumulator`, which is the address a plan node actually hands out.
         """
+        if not name.startswith(TASK_METRIC):
+            raise UnexpectedLog(
+                "{} is a plan metric rather than a task metric, so it has no stage total."
+                " read it by accumulator id".format(name))
         found = [total.value for total in self.totals if total.name == name]
         if len(found) > 1:
             raise UnexpectedLog("{} appears {} times on stage {}".format(
@@ -300,22 +327,137 @@ class Application:
         return self.accumulators.get(acc_id)
 
 
-# Accumulable name to the task field holding the same quantity. Every one of these was
-# checked against the sum over the tasks before it went on the list.
-STAGE_TOTAL_FIELDS = {
-    "internal.metrics.diskBytesSpilled": "disk_spilled",
-    "internal.metrics.executorDeserializeTime": "deserialize_time",
-    "internal.metrics.executorRunTime": "executor_run_time",
-    "internal.metrics.jvmGCTime": "gc_time",
-    "internal.metrics.memoryBytesSpilled": "memory_spilled",
-    "internal.metrics.peakExecutionMemory": "peak_memory",
-    "internal.metrics.resultSerializationTime": "serialize_time",
-    "internal.metrics.shuffle.read.localBytesRead": "local_bytes_read",
-    "internal.metrics.shuffle.read.recordsRead": "records_read",
-    "internal.metrics.shuffle.read.remoteBytesRead": "remote_bytes_read",
-    "internal.metrics.shuffle.write.bytesWritten": "bytes_written",
-    "internal.metrics.shuffle.write.recordsWritten": "records_written",
+def stage_total_fields(record=Task):
+    """Accumulable name to the task field holding the same quantity, read off the fields.
+
+    This used to be a dict kept here with twelve entries in it, which made the question
+    of what the other accumulables are a judgement nobody could fail. Now a field cannot
+    arrive without answering whether it has a stage total, and the map is whatever the
+    fields say it is.
+
+    Two fields claiming one accumulable is refused. The map is read in both directions,
+    name to field and field to name, so a collision would make one of those readings
+    quietly answer about the wrong field. `record` is an argument so that a check can
+    hand it a record with the collision in it, because a refusal nothing has ever
+    triggered is a refusal nobody has tested.
+    """
+    found = {}
+    for entry in fields(record):
+        name = entry.metadata["total"]
+        if not name:
+            continue
+        if name in found:
+            raise UnexpectedLog("{} is claimed by {} and by {}".format(
+                name, found[name], entry.name))
+        found[name] = entry.name
+    return found
+
+
+STAGE_TOTAL_FIELDS = stage_total_fields()
+
+# The task metrics this model reads past, and the reason for each one. Every name here is
+# in the log per task and the model does not keep it.
+#
+# The list is not here to be read. It is here so the twelve kept plus these cover every
+# task metric the committed logs carry, which turns the coverage of the map from a
+# judgement into something a check can fail. `tests/test_model.py` is where it fails.
+#
+# Seven of the nineteen have been nonzero somewhere in the committed logs and twelve are
+# zero on every task of every one of them. A metric that has never moved here is not
+# evidence that keeping it would be useless. It is the absence of evidence either way.
+_LOCAL_ONLY = "remote fetch, which a run on one machine never does"
+_PUSH = "push based shuffle, which is off outside a cluster that has it"
+_CPU = "cpu nanoseconds rather than wall milliseconds. the wall pair is kept"
+_UNRANKED = "a real quantity nothing here ranks yet"
+DROPPED = {
+    TASK_METRIC + "executorCpuTime": _CPU,
+    TASK_METRIC + "executorDeserializeCpuTime": _CPU,
+    TASK_METRIC + "resultSize": "bytes handed back to the driver. " + _UNRANKED,
+    TASK_METRIC + "input.recordsRead":
+        "rows off the source rather than off a shuffle. every job here reads a frame it built",
+    TASK_METRIC + "shuffle.read.fetchWaitTime":
+        "time blocked on a fetch. nonzero on two stage rows in the whole fixture set",
+    TASK_METRIC + "shuffle.read.localBlocksFetched":
+        "a block count. the bytes those blocks carried are kept",
+    TASK_METRIC + "shuffle.read.remoteBlocksFetched": _LOCAL_ONLY,
+    TASK_METRIC + "shuffle.read.remoteBytesReadToDisk": _LOCAL_ONLY,
+    TASK_METRIC + "shuffle.read.remoteReqsDuration": _LOCAL_ONLY,
+    TASK_METRIC + "shuffle.write.writeTime":
+        "nanoseconds spent writing shuffle. " + _UNRANKED,
+    TASK_METRIC + "shuffle.push.read.corruptMergedBlockChunks": _PUSH,
+    TASK_METRIC + "shuffle.push.read.localMergedBlocksFetched": _PUSH,
+    TASK_METRIC + "shuffle.push.read.localMergedBytesRead": _PUSH,
+    TASK_METRIC + "shuffle.push.read.localMergedChunksFetched": _PUSH,
+    TASK_METRIC + "shuffle.push.read.mergedFetchFallbackCount": _PUSH,
+    TASK_METRIC + "shuffle.push.read.remoteMergedBlocksFetched": _PUSH,
+    TASK_METRIC + "shuffle.push.read.remoteMergedBytesRead": _PUSH,
+    TASK_METRIC + "shuffle.push.read.remoteMergedChunksFetched": _PUSH,
+    TASK_METRIC + "shuffle.push.read.remoteMergedReqsDuration": _PUSH,
 }
+
+# What this model does with one accumulable name.
+KEPT = "kept"
+READ_PAST = "read past"
+PLAN = "plan metric"
+UNRULED = "unruled"
+
+
+def classify(name):
+    """Which of four things an accumulable name is to this model.
+
+    A task metric that is neither kept nor recorded as read past comes back `UNRULED`
+    rather than raising. A log written by a Spark this repo has never met will carry one,
+    and a profiler that refuses such a log is worse than one that says what it skipped.
+    The committed logs are held to zero of them by a check, so the tolerant answer here
+    does not buy silence there.
+    """
+    if name in STAGE_TOTAL_FIELDS:
+        return KEPT
+    if name in DROPPED:
+        return READ_PAST
+    if name.startswith(TASK_METRIC):
+        return UNRULED
+    return PLAN
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """One stage's accumulable list, split by what the model does with each name.
+
+    `rows` is how many entries the stage carries and `distinct` is how many names. They
+    differ because a plan metric name repeats, which is the reason the key is the id.
+    """
+    rows: int
+    kept: tuple
+    read_past: tuple
+    plan: tuple
+    unruled: tuple
+    repeated: tuple
+
+    @property
+    def distinct(self):
+        return len(self.kept) + len(self.read_past) + len(self.plan) + len(self.unruled)
+
+
+def coverage(stage):
+    """Every accumulable one stage carries, counted rather than implied.
+
+    The twelve the map covers is a property of the model. How much of a stage that is, is
+    a property of the log, and it moves from three stages to the next because Spark drops
+    an accumulable that never moved.
+    """
+    seen = {}
+    for total in stage.totals:
+        seen[total.name] = seen.get(total.name, 0) + 1
+    buckets = {KEPT: [], READ_PAST: [], PLAN: [], UNRULED: []}
+    for name in sorted(seen):
+        buckets[classify(name)].append(name)
+    return Coverage(rows=len(stage.totals),
+                    kept=tuple(buckets[KEPT]),
+                    read_past=tuple(buckets[READ_PAST]),
+                    plan=tuple(buckets[PLAN]),
+                    unruled=tuple(buckets[UNRULED]),
+                    repeated=tuple(name for name in sorted(seen) if seen[name] > 1))
 
 
 def totals_against_tasks(stage):

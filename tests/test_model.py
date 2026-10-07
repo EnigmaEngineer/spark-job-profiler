@@ -7,8 +7,10 @@ parser come apart again.
 """
 import ast
 import dataclasses
+import re
 import os
 import shutil
+import sys
 import tempfile
 
 from sjp import eventlog, model
@@ -29,6 +31,11 @@ def _only_log(directory):
 
 def _app(directory):
     return eventlog.profile(_only_log(directory))
+
+def _every_log():
+    """Every committed event log, so a coverage claim is over the whole fixture set."""
+    root = os.path.join(HERE, "fixtures", "eventlogs")
+    return [path for path in eventlog.logs_under(root) if not path.endswith(".md")]
 
 def spark_names_in(source):
     """Every Spark event name written as a string literal in some source text."""
@@ -194,8 +201,13 @@ def check_two_runs_of_almost_the_same_job_report_different_numbers_of_totals():
     balanced = len(_app(BALANCED).stage(GROUPING_STAGE).totals)
     assert (skewed, balanced) == (37, 35), (skewed, balanced)
 
-def check_a_repeated_total_name_is_refused_rather_than_answered():
-    """`number of output rows` is in there twice under two ids, in both logs."""
+def check_a_plan_metric_name_is_refused_by_the_stage_total_reader():
+    """`number of output rows` belongs to a plan node and has no stage total at all.
+
+    This check used to assert the repeated name refusal instead, and it is the check that
+    caught the reader changing underneath it, because it asserted the message rather than
+    the exception type. The two refusals are separate now and so are their checks.
+    """
     for directory in (SKEWED, BALANCED):
         stage = _app(directory).stage(GROUPING_STAGE)
         names = [total.name for total in stage.totals]
@@ -203,9 +215,381 @@ def check_a_repeated_total_name_is_refused_rather_than_answered():
         try:
             stage.reported_total("number of output rows")
         except model.UnexpectedLog as problem:
-            assert "2 times" in str(problem), problem
+            assert "plan metric" in str(problem), problem
+            assert "accumulator id" in str(problem), problem
         else:
-            raise AssertionError("a name appearing twice answered with one value")
+            raise AssertionError("a plan metric name answered with a stage total")
+
+
+def _leaf(name):
+    """The last segment of an accumulable name with the spelling taken out of it."""
+    return re.sub(r"[^a-z]", "", name.split(".")[-1].lower())
+
+
+def check_three_plan_metric_names_spell_the_same_thing_as_a_task_metric():
+    """The reason the refusal above exists, measured rather than argued.
+
+    Strip the namespace and the capitals off and three plan metric names in these logs
+    are byte identical to a task metric leaf. Two of the three reach a metric the model
+    keeps. The reader answered each of the three with a plan node's number on 36 stages
+    and refused it on 2, and the two it never refused at all are a different pair.
+    `check_the_plan_metric_names_the_old_reader_always_answered` has those.
+    """
+    found = set()
+    for path in _every_log():
+        for stage in eventlog.profile(path).stages:
+            found.update(total.name for total in stage.totals)
+    task_leaves = {_leaf(name) for name in set(model.STAGE_TOTAL_FIELDS) | set(model.DROPPED)}
+    collisions = sorted(name for name in found
+                        if model.classify(name) == model.PLAN and _leaf(name) in task_leaves)
+    assert collisions == ["fetch wait time", "local bytes read", "records read"], collisions
+    kept_leaves = {_leaf(name) for name in model.STAGE_TOTAL_FIELDS}
+    on_the_map = [name for name in collisions if _leaf(name) in kept_leaves]
+    assert on_the_map == ["local bytes read", "records read"], on_the_map
+
+
+def check_the_plan_metric_names_the_old_reader_always_answered():
+    """Two names the stage total reader answered on every stage that carried them.
+
+    A duplicated name was refused by count even before the namespace refusal existed, so
+    the names at real risk were the ones appearing exactly once. These two appear once on
+    all 40 stages that carry them and both spell a shuffle write quantity. The figures
+    come out of the totals rather than out of the reader, because the reader refuses them
+    now and a number that cannot be recomputed is a sentence.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import accumulable_probe
+
+    apps = {}
+    root = os.path.join(ROOT, "tests", "fixtures", "eventlogs")
+    for job in sorted(os.listdir(root)):
+        directory = os.path.join(root, job)
+        if os.path.isdir(directory):
+            apps[job] = _app(directory)
+    answered = accumulable_probe.answered_before_the_refusal(apps)
+    assert answered["shuffle bytes written"] == 40, answered["shuffle bytes written"]
+    assert answered["shuffle write time"] == 40, answered["shuffle write time"]
+    assert answered["peak memory"] == 5, answered["peak memory"]
+    assert answered["local bytes read"] == 36, answered["local bytes read"]
+    for name in ("shuffle bytes written", "shuffle write time", "peak memory"):
+        assert model.classify(name) == model.PLAN, name
+
+
+def check_the_plan_metric_a_word_away_from_the_summed_peak_is_a_plan_metric():
+    """`peak memory` is the collision that would have cost the most.
+
+    It does not spell the same thing as `peakExecutionMemory` and it reads as the same
+    question, and the summed peak is the one metric in this file that ranks the job which
+    spread its work out as the memory problem. So the two names a reader would confuse
+    are the stage total that is already known to mislead and a number about one node.
+    """
+    assert model.classify("peak memory") == model.PLAN
+    assert model.classify(PEAK) == model.KEPT
+    stage = _app(SKEWED).stage(GROUPING_STAGE)
+    assert "peak memory" in {total.name for total in stage.totals}, stage.totals
+    assert stage.reported_total(PEAK) > stage.peak_memory, stage.totals
+
+
+def check_a_repeated_task_metric_name_is_refused_by_count():
+    """The other refusal, which no committed log can reach.
+
+    Only the plan metric names repeat in these eight logs, so after the namespace refusal
+    nothing real reaches the count branch. It stays because the format permits a repeat
+    under any name and the whole reason the key is the id is that names are not unique. A
+    stage carrying its own totals twice is what tests it.
+    """
+    stage = _app(SKEWED).stage(GROUPING_STAGE)
+    doubled = dataclasses.replace(stage, totals=stage.totals + stage.totals)
+    try:
+        doubled.reported_total("internal.metrics.executorRunTime")
+    except model.UnexpectedLog as problem:
+        assert "2 times" in str(problem), problem
+    else:
+        raise AssertionError("a task metric appearing twice answered with one value")
+    assert stage.reported_total("internal.metrics.executorRunTime") == 4560, stage.totals
+
+
+def check_every_task_field_declares_whether_it_has_a_stage_total():
+    """A field arriving without an answer to that question is how the map drifted before."""
+    for entry in dataclasses.fields(model.Task):
+        assert "total" in entry.metadata, entry.name
+        name = entry.metadata["total"]
+        assert name is None or name.startswith(model.TASK_METRIC), (entry.name, name)
+
+
+def check_the_stage_total_map_is_read_off_the_fields_rather_than_kept():
+    """Twelve entries, and every one of them points at a field that exists."""
+    derived = model.stage_total_fields()
+    assert derived == model.STAGE_TOTAL_FIELDS, derived
+    assert len(derived) == 12, len(derived)
+    names = {entry.name for entry in dataclasses.fields(model.Task)}
+    assert set(derived.values()) <= names, set(derived.values()) - names
+    declared = {entry.metadata["total"] for entry in dataclasses.fields(model.Task)
+                if entry.metadata["total"]}
+    assert declared == set(derived), declared ^ set(derived)
+
+
+def check_two_fields_claiming_one_accumulable_is_refused():
+    """Otherwise the refusal is a branch nothing has ever taken."""
+    name = model.TASK_METRIC + "executorRunTime"
+
+    @dataclasses.dataclass(frozen=True)
+    class Clash:
+        one: int = model.measured(model.MILLIS, name)
+        two: int = model.measured(model.MILLIS, name)
+
+    try:
+        model.stage_total_fields(Clash)
+    except model.UnexpectedLog as problem:
+        assert "claimed by one and by two" in str(problem), problem
+    else:
+        raise AssertionError("two fields claimed one accumulable and nothing objected")
+
+
+def check_camel_casing_a_field_name_does_not_produce_the_accumulable_name():
+    """The measured reason the accumulable is declared on the field.
+
+    This is the derivation the thread asking for the map to be generated proposed, and it
+    reaches one of the twelve. The one it reaches is `executorRunTime`, which is the only
+    field in the record whose name was already Spark's.
+    """
+    hits = []
+    for name, field_name in model.STAGE_TOTAL_FIELDS.items():
+        head, *rest = field_name.split("_")
+        guess = model.TASK_METRIC + head + "".join(word.capitalize() for word in rest)
+        if guess == name:
+            hits.append(field_name)
+    assert hits == ["executor_run_time"], hits
+
+
+def check_every_declared_accumulable_appears_in_a_committed_log():
+    """A declared name no log carries is a name somebody typed."""
+    found = set()
+    for path in _every_log():
+        for stage in eventlog.profile(path).stages:
+            found.update(total.name for total in stage.totals)
+    missing = sorted(set(model.STAGE_TOTAL_FIELDS) - found)
+    assert missing == [], missing
+    unseen = sorted(set(model.DROPPED) - found)
+    assert unseen == [], unseen
+
+
+def check_every_task_metric_in_every_committed_log_is_kept_or_read_past():
+    """The completeness report. Twelve kept plus nineteen read past covers all of them."""
+    unruled = set()
+    for path in _every_log():
+        for stage in eventlog.profile(path).stages:
+            unruled.update(model.coverage(stage).unruled)
+    assert unruled == set(), sorted(unruled)
+    assert set(model.STAGE_TOTAL_FIELDS) & set(model.DROPPED) == set(), "a name is both"
+    assert len(model.DROPPED) == 19, len(model.DROPPED)
+    for name, reason in model.DROPPED.items():
+        assert reason.strip(), name
+
+
+def check_the_unruled_class_catches_a_task_metric_nobody_ruled_on():
+    """Otherwise the check above passes on a log holding nothing to rule on."""
+    stage = _app(SKEWED).stage(GROUPING_STAGE)
+    invented = model.Total(acc_id=-1, name=model.TASK_METRIC + "notAThingSparkWrites",
+                           value=7)
+    damaged = dataclasses.replace(stage, totals=stage.totals + (invented,))
+    cover = model.coverage(damaged)
+    assert cover.unruled == (invented.name,), cover
+    assert model.classify(invented.name) == model.UNRULED
+    # `distinct` adds four lengths and the unruled one is zero on every committed log, so
+    # a mutant subtracting it instead of adding it survived the whole suite. One stage
+    # with an unruled name in it is what makes that term count.
+    clean = model.coverage(stage)
+    assert cover.distinct == clean.distinct + 1, (cover.distinct, clean.distinct)
+    assert cover.rows == clean.rows + 1, (cover.rows, clean.rows)
+
+
+def check_the_grouping_stage_coverage_is_the_split_the_readme_publishes():
+    """Thirty seven rows is not twelve plus twenty five, which is what it used to say.
+
+    Ten of the twelve are on this stage and two never moved, so the readable number is a
+    property of the log. The twenty seven it does not keep split two ways, into task
+    metrics it reads past and plan metrics that were never candidates for the map.
+    """
+    cover = model.coverage(_app(SKEWED).stage(GROUPING_STAGE))
+    assert cover.rows == 37, cover.rows
+    assert cover.distinct == 36, cover.distinct
+    assert len(cover.kept) == 10, cover.kept
+    assert len(cover.read_past) == 17, cover.read_past
+    assert len(cover.plan) == 9, cover.plan
+    assert cover.unruled == (), cover.unruled
+    assert cover.repeated == ("number of output rows",), cover.repeated
+
+
+def check_the_row_count_and_the_name_count_differ_by_the_repeat():
+    """Which is the whole reason the key is the id rather than the name."""
+    for path in _every_log():
+        for stage in eventlog.profile(path).stages:
+            cover = model.coverage(stage)
+            extra = cover.rows - cover.distinct
+            assert extra >= 0, (cover.rows, cover.distinct)
+            assert extra == 0 or cover.repeated, cover
+    stage = _app(SKEWED).stage(0)
+    assert model.coverage(stage).rows == model.coverage(stage).distinct
+
+
+def check_one_leaf_spelling_is_carried_by_two_task_metrics():
+    """`recordsread` names two of them, which is why a leaf cannot be an address.
+
+    The first version of the probe keyed a dict on the leaf spelling and so reported one
+    twin for a plan metric that has two. That is the same mistake this day is about, made
+    in the code written to describe it, and it is the reason the grouping is a list.
+    """
+    grouped = {}
+    for name in sorted(set(model.STAGE_TOTAL_FIELDS) | set(model.DROPPED)):
+        grouped.setdefault(_leaf(name), []).append(name)
+    shared = {spelling: names for spelling, names in grouped.items() if len(names) > 1}
+    assert sorted(shared) == ["recordsread"], sorted(shared)
+    assert shared["recordsread"] == [model.TASK_METRIC + "input.recordsRead",
+                                     model.TASK_METRIC + "shuffle.read.recordsRead"], shared
+    assert model.classify(shared["recordsread"][0]) == model.READ_PAST
+    assert model.classify(shared["recordsread"][1]) == model.KEPT
+
+
+def check_the_accumulable_probe_runs_every_control_and_reaches_both_sides():
+    """The probe is what publishes the day's numbers, so the suite grades it too."""
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import accumulable_probe
+
+    apps = {job: _app(os.path.join(ROOT, "tests", "fixtures", "eventlogs", job))
+            for job in ("skewed", "balanced")}
+    results = accumulable_probe.controls(apps)
+    assert len(results) == 5, results
+    assert [ok for _label, ok, _detail in results] == [True] * 5, results
+
+    ok, detail = accumulable_probe.a_clean_log_has_nothing_unruled(apps)
+    assert (ok, detail) == (True, ""), detail
+    stage = apps["skewed"].stage(GROUPING_STAGE)
+    invented = model.Total(acc_id=-1, name=model.TASK_METRIC + "nope", value=1)
+    damaged = dataclasses.replace(apps["skewed"], stages=(
+        dataclasses.replace(stage, totals=stage.totals + (invented,)),))
+    broken, detail = accumulable_probe.a_clean_log_has_nothing_unruled({"x": damaged})
+    assert broken is False, detail
+    assert "unruled" in detail, detail
+
+
+def check_the_probe_agrees_with_the_model_on_both_derivation_counts():
+    """The two numbers in the docstring of `measured`, recomputed rather than quoted."""
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import accumulable_probe
+
+    rows = accumulable_probe.derivation_rows()
+    assert len(rows) == 12, len(rows)
+    assert sum(1 for _f, _g, _r, ok in rows if ok) == 1, rows
+
+    apps = {"skewed": _app(SKEWED)}
+    hits, total, _real = accumulable_probe.leaf_derivation(apps, _only_log(SKEWED))
+    assert (hits, total) == (14, 34), (hits, total)
+
+
+def _probe():
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import accumulable_probe
+    return accumulable_probe
+
+
+def _all_apps():
+    root = os.path.join(ROOT, "tests", "fixtures", "eventlogs")
+    return {job: _app(os.path.join(root, job)) for job in sorted(os.listdir(root))
+            if os.path.isdir(os.path.join(root, job))}
+
+
+def check_the_probe_counts_are_computed_rather_than_written_into_a_print():
+    """The two subtractions the report leads with, and the log list it walks."""
+    probe = _probe()
+    apps = _all_apps()
+    counts = probe.summary(apps)
+    assert counts == {"with_a_total": 12, "without_one": 8, "read_past": 19,
+                      "has_moved": 7, "never_moved": 12}, counts
+    assert counts["with_a_total"] + counts["without_one"] == len(
+        dataclasses.fields(model.Task))
+    assert counts["has_moved"] + counts["never_moved"] == counts["read_past"]
+
+    paths = probe.logs()
+    assert len(paths) == 8, paths
+    assert not any(path.endswith(".md") for path in paths), paths
+    assert all(probe.job_of(path) in apps for path in paths), paths
+
+
+def check_the_probe_names_every_metric_that_has_moved():
+    """Driven both ways, because a list of seven is also what a broken filter returns."""
+    probe = _probe()
+    apps = _all_apps()
+    moved = probe.moved(apps)
+    assert len(moved) == 7, sorted(moved)
+    assert model.TASK_METRIC + "resultSize" in moved, sorted(moved)
+    assert all(model.classify(name) == model.READ_PAST for name in moved), sorted(moved)
+
+    one = apps["skewed"]
+    stage = one.stage(GROUPING_STAGE)
+    kept = tuple(total for total in stage.totals
+                 if model.classify(total.name) != model.READ_PAST)
+    stripped = dataclasses.replace(one, stages=(dataclasses.replace(stage, totals=kept),))
+    assert probe.moved({"x": stripped}) == set(), probe.moved({"x": stripped})
+
+
+def check_the_probe_groups_a_leaf_spelling_rather_than_picking_one_name():
+    """The shape of the answer is the finding. One leaf, two task metrics."""
+    probe = _probe()
+    grouped = probe.task_metrics_by_leaf()
+    assert grouped["recordsread"] == [model.TASK_METRIC + "input.recordsRead",
+                                      model.TASK_METRIC + "shuffle.read.recordsRead"], grouped
+    assert grouped["peakexecutionmemory"] == [model.TASK_METRIC + "peakExecutionMemory"]
+
+    collisions = probe.spelling_collisions(_all_apps())
+    names = [name for name, _twins in collisions]
+    assert names == ["fetch wait time", "local bytes read", "records read"], names
+    twins = dict(collisions)
+    assert len(twins["records read"]) == 2, twins["records read"]
+    assert len(twins["local bytes read"]) == 1, twins["local bytes read"]
+
+
+def check_the_leaf_path_derivation_gets_one_right_and_these_two_wrong():
+    """Pin the rule's answers, so a mutant inside it moves an asserted string.
+
+    `leaf_derivation` only asserts a count, and a count is reachable by more than one
+    wrong rule. These three are the shapes that decided the rule cannot be the map.
+    """
+    probe = _probe()
+    hit = ("Shuffle Read Metrics", "Local Bytes Read")
+    assert probe.from_leaf_path(hit) == model.TASK_METRIC + "shuffle.read.localBytesRead"
+    assert probe.from_leaf_path(("JVM GC Time",)) == model.TASK_METRIC + "jVMGCTime"
+    assert probe.from_leaf_path(("Shuffle Read Metrics", "Total Records Read")) == (
+        model.TASK_METRIC + "shuffle.read.totalRecordsRead")
+    assert probe.from_field_name("gc_time") == model.TASK_METRIC + "gcTime"
+    assert probe.from_field_name("executor_run_time") == (
+        model.TASK_METRIC + "executorRunTime")
+    assert probe.leaf("internal.metrics.shuffle.read.localBytesRead") == "localbytesread"
+
+
+def check_seven_of_the_metrics_read_past_have_moved_in_the_committed_logs():
+    """Twelve of nineteen are zero everywhere here, and that is not evidence either way.
+
+    The nine push based shuffle names cannot move outside a cluster running it, and three
+    remote fetch names cannot move on one machine. Counting those as a gap in the map
+    would be counting a property of where this ran.
+    """
+    moved = set()
+    for path in _every_log():
+        for stage in eventlog.profile(path).stages:
+            for total in stage.totals:
+                if model.classify(total.name) != model.READ_PAST:
+                    continue
+                try:
+                    value = int(total.value)
+                except (TypeError, ValueError):
+                    continue
+                if value:
+                    moved.add(total.name)
+    assert len(moved) == 7, sorted(moved)
+    still = sorted(set(model.DROPPED) - moved)
+    assert len(still) == 12, still
+    assert all("push" in name or "remote" in name for name in still), still
 
 def check_a_total_name_that_appears_once_still_answers():
     """Otherwise the refusal above could be refusing everything."""
@@ -333,6 +717,47 @@ def check_a_task_with_no_partition_id_falls_back_to_its_index():
         _task_event(failed=False),
     ])
     assert app.stage(7).tasks[0].partition == 0, app.stage(7).tasks[0]
+
+def _dataclasses_in(holder):
+    """Every dataclass a module or a class exposes, with whether it is frozen."""
+    found = {}
+    for name in sorted(dir(holder)):
+        value = getattr(holder, name)
+        if isinstance(value, type) and dataclasses.is_dataclass(value):
+            found[name] = value.__dataclass_params__.frozen
+    return found
+
+
+def check_every_record_in_the_model_is_frozen():
+    """Driven off the module rather than off a list of records somebody remembered.
+
+    The behavioural check below builds five records by hand and asserts each refuses an
+    edit. `Coverage` arrived as the sixth and that list did not, so a mutant turning its
+    frozen flag off survived a pass over the whole module. A list of names kept beside
+    the thing it describes is what this file spent the day removing, and it was sitting
+    inside the test written to prevent exactly this.
+    """
+    found = _dataclasses_in(model)
+    assert len(found) >= 6, found
+    assert "Coverage" in found, sorted(found)
+    unfrozen = sorted(name for name, frozen in found.items() if not frozen)
+    assert unfrozen == [], unfrozen
+
+
+def check_the_frozen_walk_would_catch_a_record_that_was_not():
+    """Otherwise the walk above is a loop over records that all happen to be fine."""
+    @dataclasses.dataclass(frozen=False)
+    class Loose:
+        a: int = 0
+
+    class Holder:
+        pass
+
+    Holder.Loose = Loose
+    Holder.Coverage = model.Coverage
+    found = _dataclasses_in(Holder)
+    assert found == {"Coverage": True, "Loose": False}, found
+
 
 def check_the_records_of_the_model_cannot_be_written_to():
     app = _app(SKEWED)
