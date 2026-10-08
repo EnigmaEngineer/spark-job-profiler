@@ -687,16 +687,21 @@ On its log the sizing arithmetic in `sjp layout` reads the key exchange at 88,78
 measured bytes and wants 2 partitions rather than the 8 the session used.
 
 ```
-python scripts/benchmark.py --job skewed_join --rows 8000000 --arm current=8 --arm advised=2 --arm volume=3 --arm rounded=4 --passes 4 --out <dir>
+python scripts/benchmark.py --job skewed_join --rows 8000000 --arm current=8 --arm advised=2 --arm volume=3 --arm rounded=4 --passes 6 --out <dir>
 python scripts/benchmark.py --report <dir>/manifest.json
 ```
 
-Four passes an arm. Each run is its own process, so no arm inherits a warm session from
+Six passes an arm. Each run is its own process, so no arm inherits a warm session from
 another. The arm order rotates, so each one runs first exactly once. The first pass is
-discarded. Four against four puts the smallest reachable p at 0.0286, which is the reason
-the schedule is four and not three. Three against three cannot return anything under 0.05
-however the numbers land, and `sjp.bench` refuses to report a p for a comparison that
-size rather than printing one beside a note that it could never have mattered.
+discarded. Three against three cannot return anything under 0.05 however the numbers land,
+and `sjp.bench` refuses to report a p for a comparison that size rather than printing one
+beside a note that it could never have mattered.
+
+The schedule was four until 2026-10-08 and four was the wrong default. Four against four
+is 70 splits, and the only p under 0.05 that 70 splits can produce is the floor itself at
+0.0286. So a four pass schedule has exactly one way to say separated, and it says it at
+the weakest point on the scale. Six against six is 924 splits and 23 reachable values
+below 0.05, with a floor of 0.0022.
 
 The stage below is the one that reads every row. It is addressed by its row count and not
 by its number, because a join submits both sides at once and whichever the scheduler takes
@@ -704,27 +709,28 @@ first gets the lower stage id.
 
 ```
 the stage that reads every row, which is the one the job is about
-  current   8 tasks  wall 8236 7143 7430 7480  largest task 5953 4990 5263 5272  median task 608 504 694 562
-  advised   2 tasks  wall 7185 7793 7067 10657  largest task 7157 7766 7033 10626  median task 4806 5214 4500 6840
-  volume    3 tasks  wall 7252 7378 8087 5802  largest task 7229 7356 8063 5780  median task 1854 1616 2774 1153
-  rounded   4 tasks  wall 8216 7480 7539 8345  largest task 6924 6167 5807 6977  median task 1258 1246 1615 1313
-  wall advised against current  1.0797  undecided  p 0.7429 against a floor of 0.0286, so undecided rather than equal
-  wall volume against current  0.9416  undecided  p 0.4571 against a floor of 0.0286, so undecided rather than equal
-  wall rounded against current  1.0426  undecided  p 0.2571 against a floor of 0.0286, so undecided rather than equal
-  largest task advised against current  1.5170  separated  p 0.0286 against a floor of 0.0286
-  largest task volume against current  1.3236  undecided  p 0.0571 against a floor of 0.0286, so undecided rather than equal
-  largest task rounded against current  1.2047  undecided  p 0.0571 against a floor of 0.0286, so undecided rather than equal
+  current   8 tasks  wall 5394 5289 5261 5173 5148 4995  largest task 4223 4117 4050 3910 3921 3842  median task 320 366 318 372 412 282
+  advised   2 tasks  wall 5835 5454 5583 5276 6108 5234  largest task 5821 5439 5575 5265 6097 5220  median task 3856 3458 3623 3301 4032 3356
+  volume    3 tasks  wall 5487 5325 5467 5251 5173 5378  largest task 5475 5312 5455 5242 5162 5367  median task 1221 1283 1305 1081 1039 1063
+  rounded   4 tasks  wall 5665 5222 5805 5371 5460 5728  largest task 4616 4395 4841 4521 4542 4844  median task 1014 792 946 802 878 870
+  wall advised against current  1.0713  separated  p 0.0238 against a floor of 0.0022
+  wall volume against current  1.0263  undecided  p 0.0996 against a floor of 0.0022, so undecided rather than equal
+  wall rounded against current  1.0637  separated  p 0.0173 against a floor of 0.0022
+  largest task advised against current  1.3887  separated  p 0.0022 is the floor for 6 and 6 passes, so the arms do not interleave and no run of this size could report less
+  largest task volume against current  1.3304  separated  p 0.0022 is the floor for 6 and 6 passes, so the arms do not interleave and no run of this size could report less
+  largest task rounded against current  1.1536  separated  p 0.0022 is the floor for 6 and 6 passes, so the arms do not interleave and no run of this size could report less
 ```
 
-### Taking the advice made the job no faster and its worst task 52 percent slower
+### Taking the advice made the job no faster and its worst task 39 percent slower
 
-The stage did not move. 7,572 ms against 8,176 ms on the means is a ratio of 1.0797 at a p
-of 0.7429, which is undecided. None of the three stage wall comparisons separated and none
-of the three application wall comparisons did either.
+The stage barely moved. 5,210 ms against 5,582 ms on the means is a ratio of 1.0713, and at
+six passes that does separate, at a p of 0.0238. It is a 7 percent change on the stage
+wall. None of the three stage wall totals separated in either direction.
 
-The largest task did move and it moved the wrong way. 5,370 ms became 8,146 ms. That one
-separated at the floor, which means every reading of one arm sits above every reading of the
-other. On four passes an arm there is nothing stronger available.
+The largest task moved and it moved the wrong way. 4,010 ms became 5,570 ms. All three cut
+counts separated against the current one on this metric, and all three landed on the floor.
+Landing there means no reading of one arm sits inside the other, which is the strongest
+ordering available at any pass count rather than a strong p.
 
 The reason is the thing this README already said before any of it was run. Hash partitioning
 sends one key to one partition however many partitions there are. Eighty five percent of the
@@ -736,7 +742,7 @@ The advisory size the recommendation is built on is a total divided by a target.
 cannot see a distribution. That was an argument on an earlier read of this file and it is a
 measurement now.
 
-### I ran the same schedule twice and three of its four separations did not come back
+### At four passes I ran the same schedule twice and three of its four separations did not come back
 
 The first schedule reported four comparisons as separated at the floor. The second reported
 one.
@@ -748,10 +754,11 @@ one.
 | rounded against current | 1.1933 | 1.2047 | separated, then undecided at p 0.0571 |
 | rounded against volume | 0.8470 | 0.9102 | separated, then undecided at p 0.3143 |
 
-This is a table rather than a fenced block because no command prints it. The second column is
-in the output above. The first column cannot be re-derived from anything here, because that
-schedule's manifest was written to a scratch directory and not kept. That is the reason the
-manifest exists at all and it was thrown away anyway.
+This is a table rather than a fenced block because no command prints it. Both columns are
+four pass schedules and neither of them is the output block above any more, which now
+carries a six pass schedule. Neither manifest survived either. Both were written to a
+scratch directory and lost. That is the reason the manifest exists at all and it was thrown
+away anyway, twice.
 
 None of the three reversed. Every one stayed on the same side of 1 and lost its separation,
 and two came back at 0.0571, which is one reading out of order.
@@ -760,6 +767,38 @@ That is what a floor of 0.0286 buys. Four passes an arm gives seventy orderings 
 lowest reachable p is two of them, so a separated verdict means the two arms do not
 interleave at all. One reading moving by a few hundred milliseconds ends it. Four of those
 were being read here as results. One of them is a result.
+
+### Six passes an arm, run twice on 2026-10-08, and what came back
+
+The fix for the section above was supposed to be more passes so p stops sitting on the
+floor. That is not what more passes do, and the first schedule said so immediately.
+
+| largest task against current | first | second | outcome |
+| --- | --- | --- | --- |
+| advised | 1.3537 | 1.3887 | separated at the floor both times |
+| volume | 1.3338 | 1.3304 | separated at the floor both times |
+| rounded | 1.1728 | 1.1536 | separated at the floor both times |
+
+Three for three, twice, on the claim this project actually makes. At four passes the volume
+and rounded comparisons were the two that kept collapsing to 0.0571. At six they hold.
+
+They still land on the floor, and they always will. A pair of arms that does not interleave
+produces the two extreme splits and nothing more extreme, so its p is 2 over the split count
+at every schedule size. The floor is not a symptom of too few passes. What six passes change
+is where the floor sits, from 0.0286 and barely inside 0.05 to 0.0022 and a factor of 23
+clear of it. The reading is the same shape and it is worth more.
+
+The honest half is that nothing else reproduced. Stage wall total came back undecided on
+both schedules and flipped direction between them. On the first schedule its three ratios
+sat within 3 percent of the current count in both directions. On the second all three sat
+below it by 4 to 10 percent. Application wall separated twice on the second schedule at p
+0.0433 and p 0.0087, having separated nowhere on the first. The first schedule's manifest
+was lost when the scratch directory it was written to was reclaimed mid run, which is the
+third time that has cost this file a manifest, so the second schedule is the one published
+above and its logs are kept outside the repo.
+
+So six passes bought reproducibility on the metric that is about the hot task and bought
+nothing on the two wall clock totals. Those two are measuring the machine.
 
 The application wall is the other figure that did not survive. On the first schedule it sat
 between 32,401 ms and 32,750 ms on every arm, which reads like a quantity nothing touches.
@@ -825,6 +864,10 @@ all.
 The replacement argument was that one more partition splits the cold keys one more way and
 cuts the largest task. The first schedule measured that at 0.8470 and separated. The second
 measured 0.9102 and undecided at a p of 0.3143. Same direction, no separation.
+
+The two lines below are from a four pass schedule and the floor of 0.0286 dates them. The
+rounding question was not re-run at six passes, so it is the one comparison in this file
+that has no 2026-10-08 reading behind it.
 
 ```
 python scripts/benchmark.py --report <dir>/manifest.json --against volume
@@ -1393,19 +1436,19 @@ argument and that is already a usage error with a status of its own.
 
 ```
 python tests/run_all.py
-448 passed, 0 failed, 448 checks
+458 passed, 0 failed, 458 checks
 ```
 
-Every check is graded by a mutation pass rather than counted. Three rows are from today,
-which are `sjp/model.py` and `sjp/commands.py` and the new `scripts/accumulable_probe.py`.
-`sjp/skew.py` and `sjp/cli.py` were re-run on 2026-10-06 and `jobs/sample.py` on
-2026-10-05. The rest are earlier passes.
+Every check is graded by a mutation pass rather than counted. `sjp/bench.py` is from
+today and it is the only row that moved. `sjp/model.py` and `sjp/commands.py` and
+`scripts/accumulable_probe.py` are from 2026-10-07. `sjp/skew.py` and `sjp/cli.py` were
+re-run on 2026-10-06 and `jobs/sample.py` on 2026-10-05. The rest are earlier passes.
 
 ```
 sjp/layout.py: 114 mutation sites, running 0 to 114
 114 killed, 0 survived, 0 ungraded, 114 graded
-sjp/bench.py: 38 mutation sites, running 0 to 38
-34 killed, 4 survived, 0 ungraded, 38 graded
+sjp/bench.py: 43 mutation sites, running 0 to 43
+43 killed, 0 survived, 0 ungraded, 43 graded
 sjp/model.py: 91 mutation sites, running 0 to 91
 91 killed, 0 survived, 0 ungraded, 91 graded
 sjp/plan.py: 33 mutation sites, running 0 to 33
@@ -1476,16 +1519,28 @@ the constant and the check together. Those were replaced by checks that read the
 settings out of the committed logs instead. The score fell and the question being asked got
 better.
 
-The four survivors in `sjp/bench.py` are all boundary comparisons and all four were checked
-rather than waved through. One widens a float tolerance that already absorbs the
-difference, so the two forms give the same answer on every input tried and on every input
-where the values differ by more than a nanosecond. The other three separate a p value or a
-floor from the threshold at exactly equal, and a p value is a count over the number of
-splits. Four passes an arm puts that denominator at 70 and 0.05 of 70 is 3.5, so the case
-is not reachable on the schedule this repo runs. It is reachable at 2 passes against 14,
-which is not a benchmark anyone would run. The first pass at this module killed 24 of 38.
-Six survivors were guards checked against a value they must refuse and never against the
-smallest value they must accept, and four were records nothing asserted frozen.
+`sjp/bench.py` had four survivors until 2026-10-08 and has none now. All four were
+boundary comparisons and the two halves needed different answers.
+
+One widened a float tolerance that already absorbed the difference, so the two forms were
+the same function on any input where the values differ by more than a nanosecond. That one
+is gone rather than killed. The tolerance existed so the observed split could match itself,
+and the comparison now runs on fractions instead, cross multiplied by the two arm sizes so
+no division happens. The observed split matches itself by being the same number. Every p in
+this file reproduced to the last digit across that rewrite, which was the point of it.
+
+The other three separated a p value or a floor from the threshold at exactly equal. On the
+default alpha that case is unreachable, and more cleanly than the old note here claimed. A
+split and its complement are both enumerated and both score the same gap, so the extreme
+count is always even when the arms are the same size. An exact p of 0.05 needs the split
+total divided by twenty to be an even whole number, and it is odd at the only two pass
+counts from 3 to 12 where it is whole at all. What is reachable is alpha itself, because
+alpha is an argument. Three checks now pass one and the mutants die on the sentence the
+verdict prints rather than on its outcome.
+
+The first pass at this module killed 24 of 38. Six survivors were guards checked against a
+value they must refuse and never against the smallest value they must accept, and four were
+records nothing asserted frozen.
 
 The one survivor in `scripts/fixture_probe.py` moves a `sys.path.insert` index from 0 to 1,
 which changes nothing about what gets imported here. It is left alone rather than tested.
@@ -1597,11 +1652,16 @@ not, so a spill ratio and a duration ratio are still judged against the same 4.0
 measured here says what the difference should be, so per metric thresholds wait for a log that
 argues for one.
 
-Four passes an arm puts the lowest reachable p at 0.0286, so a separated verdict means the
-two arms do not interleave at all and one reading decides it. Running the schedule a second
-time kept one of its four separations. Read a separated verdict here as a direction worth
-re-running rather than as a settled number, and read an undecided one as carrying almost no
-information at this sample size.
+Six passes an arm puts the floor at 0.0022 and gives 23 reachable p values under 0.05. A
+separated verdict that lands on the floor still means only that the two arms do not
+interleave, and that is the ordinary shape of a real separation rather than a weak one.
+`Verdict.on_floor` reports which case a caller is holding. The schedule was four until
+2026-10-08, where 70 splits left the floor as the only reachable p under 0.05, so every
+separation it could report was a separation at the floor.
+
+Two six pass schedules were run on 2026-10-08. The three largest task comparisons separated
+on both. Nothing else did, and an undecided verdict here still carries almost no
+information.
 
 Closed in v2. The exchanges one partition count controls are grouped and counted once, and
 an origin this repo has never seen is reported as unrecognised rather than as a number
@@ -1648,10 +1708,12 @@ The benchmark ran on two slots on one machine. A partition count that leaves cor
 a two slot local session is not the same mistake it is on a cluster, and the wave arithmetic
 in the partition target has only ever been tested where a wave is two tasks wide.
 
-Four passes an arm is the smallest schedule that can return a p under 0.05, so every
-comparison here either lands on the floor or lands nowhere. An effect real but smaller than
-these arms can separate reads as undecided, and undecided is not a finding of no difference.
+Six passes an arm is the default and four was the default until 2026-10-08. An effect real
+but smaller than these arms can separate reads as undecided, and undecided is not a finding
+of no difference.
 
-The benchmark logs are not committed. Four arms at four passes is about seventeen event logs
-and tens of megabytes, and the numbers above are reproducible from the command beside them
-rather than from a file in the tree.
+The benchmark logs are not committed. Four arms at six passes is twenty five event logs and
+tens of megabytes, and the numbers above are reproducible from the command beside them
+rather than from a file in the tree. Two schedules were run on 2026-10-08 and the first
+one's manifest was lost when its scratch directory was reclaimed mid run, so the second
+one's logs were written outside the repo instead.
