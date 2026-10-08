@@ -12,6 +12,7 @@ all on three against three is the part that stops a result being published.
 The fixtures are deliberately lopsided. A pair of arms split evenly around the same mean
 survives an inverted comparison, because the difference of means does not move.
 """
+import math
 import os
 
 from sjp import bench, eventlog
@@ -100,6 +101,108 @@ def check_an_unseparated_comparison_says_undecided_rather_than_equal():
     found = bench.verdict([1, 4, 5, 8], [2, 3, 6, 7])
     assert found.decided is False
     assert "undecided rather than equal" in found.why
+
+def check_a_separated_verdict_says_its_p_is_the_floor():
+    """The word on its own was the whole of `ot-104`.
+
+    A reader who sees "separated" takes it as a small p. What it means at this size is
+    that the arms do not interleave, and the sentence has to say so.
+    """
+    found = bench.verdict([1, 2, 3, 4], [10, 11, 12, 13])
+    assert found.on_floor is True
+    assert "is the floor" in found.why, found.why
+    assert "no run of this size could report less" in found.why, found.why
+
+def check_a_verdict_above_the_floor_does_not_claim_to_be_on_it():
+    """The control for the check above. Six passes an arm can land here and four cannot."""
+    left = [4996, 5393, 5421, 5783, 5371, 5453]
+    right = [5622, 5885, 5905, 5652, 6401, 6038]
+    found = bench.verdict(left, right)
+    assert found.decided is True
+    assert found.on_floor is False, found.p
+    assert found.p > found.floor
+    assert "against a floor of" in found.why, found.why
+
+def check_an_underpowered_comparison_is_not_on_the_floor_either():
+    """No p means no reading of the floor. `on_floor` must not be true by default."""
+    found = bench.verdict([1, 2, 3], [10, 11, 12])
+    assert found.p is None
+    assert found.on_floor is False
+
+def check_a_p_sitting_exactly_on_alpha_is_decided():
+    """The boundary `ot-099` called unreachable, reached through the alpha argument.
+
+    These eight values give an exact p of 4/70. The default alpha cannot be hit this way,
+    which the check below proves, but alpha is an argument and a caller can pass one.
+    """
+    found = bench.verdict([1, 2, 3, 5], [4, 6, 7, 8], alpha=4 / 70)
+    assert found.p == 4 / 70, found.p
+    assert found.decided is True, found.why
+    # A verdict that separated must not describe itself as undecided. The outcome and the
+    # sentence are computed from two different comparisons and they can disagree.
+    assert "undecided" not in found.why, found.why
+
+def check_no_decided_verdict_ever_calls_itself_undecided():
+    """The outcome and the sentence come from separate comparisons of p against alpha."""
+    cases = ((([1, 2, 3, 4], [10, 11, 12, 13]), 0.05),
+             (([1, 2, 3, 5], [4, 6, 7, 8]), 4 / 70),
+             (([4996, 5393, 5421, 5783, 5371, 5453],
+               [5622, 5885, 5905, 5652, 6401, 6038]), 0.05))
+    for (left, right), alpha in cases:
+        found = bench.verdict(left, right, alpha=alpha)
+        assert found.decided is True, (left, right, alpha, found.why)
+        assert "undecided" not in found.why, found.why
+
+def check_a_floor_sitting_exactly_on_alpha_is_not_refused():
+    """A floor equal to alpha is reachable, so the refusal has to be strictly above it."""
+    found = bench.verdict([1, 2, 3, 4], [10, 11, 12, 13], alpha=bench.p_floor(4, 4))
+    assert found.floor == bench.p_floor(4, 4)
+    assert found.p is not None, found.why
+    assert found.decided is True
+
+def check_equal_arms_cannot_land_exactly_on_five_percent():
+    """Why the two alpha boundaries above need a hand picked alpha to reach.
+
+    A split and its complement are both enumerated and both score the same gap, so they
+    are extreme together and the count is always even. An exact p of 0.05 would need
+    half the split total divided by ten, and that is odd at the two pass counts where it
+    is a whole number at all.
+    """
+    for passes in range(3, 13):
+        splits = math.comb(2 * passes, passes)
+        reachable = splits * 0.05
+        assert not (reachable.is_integer() and int(reachable) % 2 == 0), passes
+
+def check_the_extreme_count_is_even_whenever_the_arms_are_the_same_size():
+    """The parity the check above rests on, measured rather than argued."""
+    for left, right in (([1, 2, 3, 4], [10, 11, 12, 13]),
+                        ([1, 4, 5, 8], [2, 3, 6, 7]),
+                        ([5, 5, 5, 5], [5, 5, 5, 6])):
+        splits = math.comb(len(left) + len(right), len(left))
+        assert round(bench.permutation_p(left, right) * splits) % 2 == 0
+
+def check_a_tied_split_is_counted_rather_than_absorbed_by_a_tolerance():
+    """What replaced the epsilon.
+
+    Integer milliseconds produce splits that tie with the observed one. The old code
+    compared floats against `observed - 1e-9`, which counted a tie and would have counted
+    it just as well with the comparison written the other way. Exact arithmetic makes the
+    tie a real equality, so it is the comparison that decides it.
+    """
+    left, right = [1, 2, 3, 4], [1, 2, 3, 4]
+    assert bench.permutation_p(left, right) == 1.0
+    one_apart = bench.permutation_p([1, 2, 3, 4], [2, 3, 4, 5])
+    assert one_apart > bench.p_floor(4, 4), one_apart
+
+def check_the_exact_rewrite_moved_no_p_on_a_real_pair():
+    """Readings off the 2026-10-08 schedule, where the float version gave the same p.
+
+    Kept as a fixture rather than a note, because the rewrite's whole claim is that it
+    changed the arithmetic and not the answer.
+    """
+    current = [3924, 4140, 4209, 4367, 4161, 4189]
+    advised = [5323, 5837, 5279, 5473, 6121, 5796]
+    assert bench.permutation_p(current, advised) == bench.p_floor(6, 6)
 
 def check_the_ratio_is_the_second_arm_over_the_first():
     found = bench.verdict([10, 10, 10, 10], [20, 20, 20, 20])

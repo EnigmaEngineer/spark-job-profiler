@@ -17,6 +17,19 @@ is computed from the pass counts before any run happens. Four passes an arm is t
 smallest schedule that can return anything under 0.05, and three passes an arm cannot, so
 a three pass run is refused rather than reported.
 
+Smallest is not the one to run. Four against four is 70 splits and the only reachable p
+below 0.05 is the floor itself, so every separation that schedule can report is a
+separation at the floor. Six against six is 924 splits and 23 reachable values below
+0.05. Measured on 2026-10-08 over 24 runs of one job, three of the four separations still
+landed on the floor and the fourth did not. That fourth reading is the thing four passes
+cannot produce at all.
+
+Landing on the floor is not a fault to schedule away. Any pair of arms that does not
+interleave lands there at every pass count, because the two extreme splits are the only
+ones more extreme than an uninterleaved observation. What more passes buy is a floor far
+enough under 0.05 that the reading means something. `Verdict.on_floor` says which case a
+caller is looking at, because the word separated does not.
+
 What it does not do is decide that two arms are the same. Failing to separate four
 readings is not evidence that a difference is absent, and `Verdict.decided` is false in
 both cases for that reason. The word the report uses is undecided.
@@ -25,6 +38,7 @@ import itertools
 import math
 import statistics
 from dataclasses import dataclass
+from fractions import Fraction
 
 from sjp import eventlog
 
@@ -160,19 +174,31 @@ def permutation_p(left, right):
 
     Every split of the pooled values is enumerated, so this is the real answer for these
     counts rather than a sample of it. Eight observations is seventy splits.
+
+    The arithmetic is exact rather than floating point. A mean that is not representable
+    used to need a tolerance here so the observed split could match itself. A tolerance
+    wide enough to do that is also wide enough that widening it further changes no
+    answer, which left the comparison saying the same thing whichever way it was
+    written. Cross multiplying by the two arm sizes removes the division, so the observed
+    split matches itself by being the same number rather than by being near it.
     """
-    pooled = list(left) + list(right)
+    pooled = [Fraction(value) for value in list(left) + list(right)]
     size = len(left)
-    observed = abs(statistics.fmean(left) - statistics.fmean(right))
+    rest = len(pooled) - size
+    pooled_total = sum(pooled)
+
+    def gap(chosen):
+        """The difference of means, scaled by both arm sizes so no division happens."""
+        return abs(chosen * rest - (pooled_total - chosen) * size)
+
+    observed = gap(sum(pooled[:size]))
     total = extreme = 0
     for combination in itertools.combinations(range(len(pooled)), size):
-        chosen = set(combination)
-        a = [pooled[index] for index in combination]
-        b = [pooled[index] for index in range(len(pooled)) if index not in chosen]
         total += 1
-        # The tolerance is there because the observed split is one of the enumerated ones
-        # and floating point subtraction must not let it miss itself.
-        if abs(statistics.fmean(a) - statistics.fmean(b)) >= observed - 1e-9:
+        # Equality here is a real tie rather than a rounding artefact, and integer
+        # milliseconds produce plenty of them. The observed split is one of these, so
+        # dropping the equal case would make the count come back short of the floor.
+        if gap(sum(pooled[index] for index in combination)) >= observed:
             extreme += 1
     return extreme / total
 
@@ -194,6 +220,21 @@ class Verdict:
             return None
         return self.right_mean / self.left_mean
 
+    @property
+    def on_floor(self):
+        """True when p is the smallest value these pass counts could have returned.
+
+        A separation that lands here means no reading of one arm sits inside the other.
+        That is the strongest ordering the data can show and it is not the same thing as
+        a small p. No schedule of this size could have reported less, so the number says
+        where the floor is rather than how large the effect is.
+
+        It is also the ordinary outcome rather than an edge case. Any pair of arms that
+        does not interleave lands exactly here at every pass count, which is why the
+        word on its own was never enough to publish.
+        """
+        return self.p is not None and self.p <= self.floor
+
 
 def verdict(left, right, alpha=0.05):
     """Compare two arms' readings.
@@ -212,7 +253,11 @@ def verdict(left, right, alpha=0.05):
                            "which is above {}. No result here could be significant, so "
                            "none is offered".format(len(left), len(right), floor, alpha))
     found = permutation_p(left, right)
-    if found <= alpha:
+    if found <= floor:
+        why = ("p {:.4f} is the floor for {} and {} passes, so the arms do not "
+               "interleave and no run of this size could report less".format(
+                   found, len(left), len(right)))
+    elif found <= alpha:
         why = "p {:.4f} against a floor of {:.4f}".format(found, floor)
     else:
         why = "p {:.4f} against a floor of {:.4f}, so undecided rather than equal".format(
