@@ -382,16 +382,18 @@ def advise(app, shuffle, advisory=ADVISORY_BYTES, threshold=skew.DEFAULT_THRESHO
     """The sizing, plus the one case where this repo measured the sizing to be wrong.
 
     `size` is arithmetic over a total and a total cannot see a distribution. There is one
-    shape where that arithmetic was benchmarked and it lost, on two separate schedules
-    two days apart. Cutting the count on a hash partitioning whose next stage is
-    carrying a hot key left the stage wall undecided both times, at ratios of 0.9916 and
-    1.0797. It made the largest task slower both times and separated both times, at
-    ratios of 1.3979 and 1.5170 against a p floor of 0.0286. A hash sends one key to one
-    partition at any count, so a cut moves every other key onto fewer partitions and the
-    hot task carries more of them.
+    shape where that arithmetic was benchmarked and it lost, on four separate schedules
+    now. Cutting the count on a hash partitioning whose next stage is carrying a hot key
+    left the stage wall total undecided on every one of them. It made the largest task
+    slower every time and separated every time. The two four pass schedules read 1.3979
+    and 1.5170 against a floor of 0.0286. The two six pass schedules of 2026-10-08 read
+    1.3887 and 1.3537 against a floor of 0.0022. A hash sends one key to one partition at
+    any count, so a cut moves every other key onto fewer partitions and the hot task
+    carries more of them.
 
-    This is the only comparison in the benchmark that separated on both schedules, which
-    is the reason the guard rests on it rather than on any of the others.
+    This is the only comparison in the benchmark that has separated on every schedule,
+    which is the reason the guard rests on it rather than on any of the others. The two
+    wall clock totals have each separated on one schedule and not on the next.
 
     Only a cut is withheld. Raising the count on such a stage splits the cold keys further
     and the same benchmark measured that helping, so the guard has no reason to block it.
