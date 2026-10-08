@@ -1,7 +1,7 @@
 """Run one job at several partition counts and report what moved.
 
     python scripts/benchmark.py --job skewed_join --rows 8000000 \
-        --arm current=8 --arm advised=2 --passes 4 --out /tmp/bench
+        --arm current=8 --arm advised=2 --passes 6 --out /tmp/bench
     python scripts/benchmark.py --report /tmp/bench/manifest.json
 
 Each run is its own process. A session started in a process that has already run one is
@@ -204,7 +204,9 @@ def main(argv=None):
     parser.add_argument("--job", default="skewed_join")
     parser.add_argument("--rows", type=int, default=8000000)
     parser.add_argument("--arm", action="append", type=parse_arm, default=[])
-    parser.add_argument("--passes", type=int, default=4)
+    # Six rather than four. Four passes an arm can only ever report a separation at the
+    # floor, because 70 splits put the one reachable p under 0.05 at 2/70. See sjp.bench.
+    parser.add_argument("--passes", type=int, default=6)
     parser.add_argument("--out")
     parser.add_argument("--limit", type=int, default=0,
                         help="stop after this many runs, so a long schedule can be split")
