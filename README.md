@@ -84,7 +84,7 @@ tests/fixtures/     six real event logs, unedited
 ## The sample jobs
 
 Five jobs over 8,000,000 rows. Same payload in all of them. Adaptive execution off. Two more
-were added in cycle 2 and they are described further down, because neither of them carries a
+were added later and they are described further down, because neither of them carries a
 pathology in the query.
 
 The first two differ in one expression. One puts 85 percent of the rows on a single key.
@@ -1100,8 +1100,8 @@ $ python -m sjp skew tests/fixtures/eventlogs/wide/*     | wc -l
 676
 ```
 
-Both figures are one higher than they were when this section was written, because day 5
-added the line naming the metric set under the tally. The heading moved with them.
+Both figures are one higher than they were when this section was written, because a later
+change added the line naming the metric set under the tally. The heading moved with them.
 
 The `wide` job runs 24 small aggregates in one application instead of one large one, which
 gives the application 48 stages. 48 stages times the 14 metric default set is 672 verdicts.
@@ -1264,8 +1264,8 @@ Added 2026-10-03. Three changes to the same command and not one of them is about
 **The summary moved to the top.** The worst line per unit, then the tally, then the
 verdicts. The wide log still prints every verdict it did before. Trimming was never the fix.
 
-The figure was 675 when this section was written and it is 676 now, because day 5 added one
-line under the tally on every run.
+The figure was 675 when this section was written and it is 676 now, because a later change
+added one line under the tally on every run.
 
 **`--only` filters the body**, one outcome at a time.
 
@@ -1494,7 +1494,7 @@ a branch, and a branch choice needs no driver at all.
 So 33 survivors read as a property of the module rather than as a missing test, and one of
 them was not a mutant in a copy. It was a mutant that had been committed. A killed mutation
 pass left `job == "by_column"` as `job != "by_column"` in the working tree and the commit
-that added the two cycle 2 jobs took it in. Four job names then went down one branch, two
+that added the two later jobs took it in. Four job names then went down one branch, two
 crashed on a frame they were never handed, and `python -m sjp capture --job small` could not
 produce the fixture this file publishes figures from. The suite stayed green for three days
 because nothing had ever called `run` past its first line.

@@ -435,7 +435,7 @@ def check_a_verdict_reason_carries_both_numbers_it_was_decided_on():
     why = skew.judge(stage, "records_read").why
     assert "6932663" in why and "156784" in why, why
 
-# ranking and filtering, added day 2 for ot-095
+# ranking and filtering, added for the wide log
 
 def check_ranking_is_a_permutation_and_drops_nothing():
     """A reordering that loses a row is the failure mode the tally would not catch."""
@@ -489,7 +489,7 @@ def check_an_undecided_verdict_sorts_last_inside_its_kind_rather_than_crashing()
 
 
 def check_a_scan_refuses_every_metric_a_ratio_cannot_measure():
-    """The replacement for the day 2 check that asserted the opposite.
+    """The replacement for an earlier check that asserted the opposite.
 
     That one pinned `scan` judging `launch_time` and `rank_key` sorting the verdict after
     the measured kinds. It was right about the sort and it was describing a defect, which
@@ -804,7 +804,7 @@ def check_the_millisecond_floor_still_leaves_the_small_log_two_verdicts():
 
     Both are executor run time on a 600 row job and neither is worth acting on. The byte
     and count verdicts are gone and these two are the residue, which is the honest state
-    of this fixture and the reason `ot-117` is open.
+    of this fixture and the reason the floor question is still open.
     """
     left = [v for v in skew.scan(_app(SMALL_DIR))
             if v.outcome == skew.SKEWED]

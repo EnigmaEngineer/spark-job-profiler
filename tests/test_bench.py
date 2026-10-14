@@ -103,7 +103,7 @@ def check_an_unseparated_comparison_says_undecided_rather_than_equal():
     assert "undecided rather than equal" in found.why
 
 def check_a_separated_verdict_says_its_p_is_the_floor():
-    """The word on its own was the whole of `ot-104`.
+    """The word on its own was the whole of the bug.
 
     A reader who sees "separated" takes it as a small p. What it means at this size is
     that the arms do not interleave, and the sentence has to say so.
@@ -130,7 +130,7 @@ def check_an_underpowered_comparison_is_not_on_the_floor_either():
     assert found.on_floor is False
 
 def check_a_p_sitting_exactly_on_alpha_is_decided():
-    """The boundary `ot-099` called unreachable, reached through the alpha argument.
+    """The boundary I had written off as unreachable, reached through the alpha argument.
 
     These eight values give an exact p of 4/70. The default alpha cannot be hit this way,
     which the check below proves, but alpha is an argument and a caller can pass one.

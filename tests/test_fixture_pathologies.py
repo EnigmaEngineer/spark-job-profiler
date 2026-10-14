@@ -28,7 +28,7 @@ BALANCED_RECORDS = {0: (0, 0), 1: (1000000, 1000000), 2: (984924.5, 1206030)}
 FIRST_STAGE_SPILL = (117440288, 61304287)
 GROUPING_STAGE = 2
 
-# The two cycle 2 fixtures, captured 2026-10-02. Neither carries a pathology in the query.
+# The two later fixtures, captured 2026-10-02. Neither carries a pathology in the query.
 # Each carries one the profiler's own output has.
 #
 # `wide` is 48 stages, and 48 times the 14 metric default set is the 672 verdicts the scan
@@ -36,9 +36,9 @@ GROUPING_STAGE = 2
 # worst line per unit. Pinned because the whole reason the fixture exists is the size of
 # that number.
 #
-# 675 and 4 until 2026-10-06. Day 5 put the build and the metric set id under the tally,
+# 675 and 4 until 2026-10-06, when the build and the metric set id went under the tally,
 # which is one line on every run of this command. Both figures are re-measured here rather
-# than incremented, and the day 2 post quoting 675 was accurate the day it was written.
+# than incremented, and anything quoting 675 before then was accurate when it was written.
 WIDE_STAGES = 48
 WIDE_VERDICTS = 672
 WIDE_LINES = 676
@@ -239,14 +239,14 @@ def check_the_wide_fixture_still_carries_the_stage_count_it_was_captured_for():
 
 
 def check_the_wide_fixture_still_prints_every_verdict_and_answers_in_the_first_three():
-    """This is `ot-095` after day 2, and the line count is deliberately unchanged.
+    """The wide log after the reordering, and the line count is deliberately unchanged.
 
     675 lines for a job with nothing wrong with it was never a length problem. The two
     lines carrying the answer were 674 and 675, so a reader scrolled a screen of noise to
-    reach them. Day 2 moved them to 2 and 3 and left the body where it was.
+    reach them. The fix moved them to 2 and 3 and left the body where it was.
 
-    The five cycle 1 logs all print between 45 and 61 lines, which is why the seven days
-    of work that produced them never ran into this.
+    The five original logs all print between 45 and 61 lines, which is why the work
+    that produced them never ran into this.
     """
     from sjp import commands, skew
 
@@ -280,7 +280,7 @@ def check_filtering_the_wide_fixture_answers_in_five_lines():
 
 
 def check_the_small_fixture_reports_byte_and_record_skew_nobody_would_act_on():
-    """This is the `ot-093` evidence. `skew.FLOORS` leaves bytes and counts at None, and
+    """This is the evidence for the missing floors. `skew.FLOORS` leaves bytes and counts at None, and
     None means no floor, so these two are reported skewed on a few kilobytes.
 
     Neither of these is a bug in the arithmetic. 7,449 bytes really is 9.4 times 793. The

@@ -188,7 +188,7 @@ def skew_lines(app, verdicts, threshold, metrics, only=None):
     Takes the verdicts rather than computing them, so the lines and the command's exit
     status cannot come from two separate scans that disagree.
 
-    The order here is the day 2 change and the reason is the wide fixture. 48 stages times
+    The order here changed after the first week and the reason is the wide fixture. 48 stages times
     14 metrics is 672 verdict lines for a job that is not skewed anywhere, and the two
     lines answering the question used to be 674 and 675. Nothing about the length was the
     problem. A reader scrolling to the bottom of a screen of noise to find out there was
@@ -202,9 +202,9 @@ def skew_lines(app, verdicts, threshold, metrics, only=None):
 
     `metrics` is here for the contract line under the tally and for nothing else. The
     status this command returns is counted over whatever was judged, so a shell that
-    stored a 0 last week cannot read it without the set that produced it. Day 5 widened
-    the set from three names to fourteen and the same log changed its answer, with nothing
-    in the output saying so.
+    stored a 0 last week cannot read it without the set that produced it. Widening the set
+    from three names to fourteen changed the same log's answer, with nothing in the output
+    saying so.
     """
     lines = ["{}  {}  threshold {}  {}".format(
         app.app_id, app.name, threshold, counted(len(verdicts), "verdict"))]

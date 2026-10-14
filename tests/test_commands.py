@@ -217,7 +217,7 @@ def check_skew_exits_one_on_the_skewed_log_and_zero_on_the_balanced_one():
 
 
 def check_skew_names_the_worst_stage_or_says_nothing_skewed():
-    """The worst lines sit directly under the header as of day 2.
+    """The worst lines sit directly under the header now.
 
     They used to be last. This check asserted that, correctly, for as long as it was true.
     What it is pinning now is the position and not just the presence, because the whole
@@ -262,7 +262,7 @@ def check_only_does_not_change_the_exit_status_or_the_tally():
 def check_skew_prints_one_line_per_stage_and_metric_plus_four():
     """The header, the tally, the contract line and the worst line.
 
-    Plus three until day 5 added the contract line under the tally. A dropped row would
+    Plus three until the contract line went in under the tally. A dropped row would
     otherwise be invisible, which is the reason this counts rather than samples.
     """
     app = eventlog.profile(_only_log(SKEWED))
@@ -287,7 +287,7 @@ def check_skew_takes_one_metric_when_asked_for_one():
 
 
 def check_a_metric_a_ratio_cannot_measure_is_refused_with_a_status_of_its_own():
-    """`ot-113` and `ot-094` together, and the status is the half that matters.
+    """Two bugs fixed together, and the status is the half that matters.
 
     `--metric launch_time` used to print two even verdicts at 1.0000 and exit 0, which a
     shell reads as a job with nothing wrong. `--metric executor_id` used to raise a

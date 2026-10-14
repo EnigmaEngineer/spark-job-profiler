@@ -349,8 +349,8 @@ def check_two_fields_claiming_one_accumulable_is_refused():
 def check_camel_casing_a_field_name_does_not_produce_the_accumulable_name():
     """The measured reason the accumulable is declared on the field.
 
-    This is the derivation the thread asking for the map to be generated proposed, and it
-    reaches one of the twelve. The one it reaches is `executorRunTime`, which is the only
+    This is the derivation I proposed for generating the map, and it reaches one of the
+    twelve. The one it reaches is `executorRunTime`, which is the only
     field in the record whose name was already Spark's.
     """
     hits = []

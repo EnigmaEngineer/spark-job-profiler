@@ -66,7 +66,7 @@ A stage id is not stable across two runs of the join job. Its plan is not a stra
 the two sides are submitted together, and whichever is scheduled first takes the lower id.
 Address a stage by something the log guarantees rather than by its number.
 
-## The two cycle 2 logs, and why a row count would not have produced them
+## The two later logs, and why a row count would not have produced them
 
 `wide` runs 24 small aggregates in one application rather than one large one, so the
 application carries **48 stages**. Chaining them into a single plan would have given one job

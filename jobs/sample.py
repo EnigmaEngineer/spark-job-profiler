@@ -28,7 +28,7 @@ nothing about how many ways, so the count comes from the session exactly as it d
 when a join demands the partitioning. The exchange records a different origin, and
 reading that origin as a number somebody typed is what this job exists to catch.
 
-The sixth and seventh are cycle 2 additions and neither of them is a pathology in the
+The sixth and seventh were added later and neither of them is a pathology in the
 query. They are pathologies in the profiler's own output.
 
 The sixth runs many small aggregates in one application instead of one large one. Nothing
